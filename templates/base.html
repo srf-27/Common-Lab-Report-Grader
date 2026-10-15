@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#f5f5f7">
+    <title>{% block title %}实验报告智能评阅{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <aside class="sidebar" aria-label="侧栏导航">
+        <div class="brand">
+            <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 12h6"/><path d="M9 16h4"/></svg>
+            <span class="brand-name">智能评阅</span>
+        </div>
+
+        <div class="session-box">
+            <label class="session-label" for="session-select">课程</label>
+            <form action="/session/switch" method="post">
+                <input type="hidden" name="next" value="{{ request.path }}">
+                <select id="session-select" name="session_id" class="session-select" onchange="this.form.submit()">
+                    {% for s in sessions %}
+                    <option value="{{ s.id }}" {% if s.id == current_session.id %}selected{% endif %}>{{ s.name }}</option>
+                    {% endfor %}
+                </select>
+            </form>
+            <form action="/session/new" method="post" class="session-new">
+                <input type="text" name="name" class="session-new-input" placeholder="新课程名称" maxlength="40" required>
+                <button type="submit" class="session-new-btn" aria-label="新建课程">＋</button>
+            </form>
+        </div>
+
+        <nav class="nav">
+            <a href="/" class="nav-item {% if request.path == '/' %}active{% endif %}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                <span>工作台</span>
+            </a>
+            <a href="/rubric_review" class="nav-item {% if 'rubric' in request.path %}active{% endif %}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.3 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></svg>
+                <span>评分细则</span>
+            </a>
+            <a href="/reports_list" class="nav-item {% if 'report' in request.path %}active{% endif %}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+                <span>报告管理</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-foot">
+            <a href="/settings" class="nav-item {% if 'settings' in request.path %}active{% endif %}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                <span>模型配置</span>
+            </a>
+            <div class="rubric-status">
+                <span class="status-dot {% if rubric %}on{% else %}off{% endif %}" aria-hidden="true"></span>
+                <span>细则{{ '已就绪' if rubric else '未配置' }}</span>
+            </div>
+        </div>
+    </aside>
+
+    <main class="main" id="main">
+        {% block content %}{% endblock %}
+    </main>
+
+    <div class="reader-backdrop" id="reader-backdrop" onclick="closeReader()"></div>
+    <aside class="reader-drawer" id="reader-drawer" aria-hidden="true" aria-label="原文阅读器">
+        <div class="reader-head">
+            <strong id="reader-title">原文阅读器</strong>
+            <button class="reader-close" onclick="closeReader()" aria-label="关闭阅读器">&times;</button>
+        </div>
+        <div class="reader-body" id="reader-body"></div>
+        <div class="reader-foot" id="reader-foot">
+            <button class="btn btn-sm" id="reader-prev" onclick="readerTurn(-1)">上一页</button>
+            <span id="reader-pos" class="reader-pos">-</span>
+            <button class="btn btn-sm" id="reader-next" onclick="readerTurn(1)">下一页</button>
+        </div>
+    </aside>
+
+    <script src="{{ url_for('static', filename='vendor/mammoth.browser.min.js') }}"></script>
+    <script>
+    var readerData = null, readerIdx = 0;
+    function escHtml(s) {
+        return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    function showDrawer(title) {
+        document.getElementById("reader-title").textContent = title;
+        document.getElementById("reader-drawer").classList.add("open");
+        document.getElementById("reader-backdrop").classList.add("open");
+    }
+    function openReader(fid) {
+        var ext = fid.split(".").pop().toLowerCase();
+        var body = document.getElementById("reader-body");
+        document.getElementById("reader-foot").style.display = "none";
+        showDrawer(fid);
+        if (ext === "pdf") {
+            body.innerHTML = '<iframe class="reader-frame" src="/report_original/' + encodeURIComponent(fid) + '"></iframe>';
+        } else if (typeof mammoth !== "undefined") {
+            body.innerHTML = '<p class="reader-para">正在渲染文档…</p>';
+            fetch("/report_original/" + encodeURIComponent(fid))
+                .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.arrayBuffer(); })
+                .then(function (buf) { return mammoth.convertToHtml({ arrayBuffer: buf }); })
+                .then(function (res) {
+                    body.innerHTML = '<div class="reader-docx">' + res.value + "</div>";
+                    body.scrollTop = 0;
+                })
+                .catch(function () { openTextReader(fid); });
+        }
+    }
+    function openTextReader(fid) {
+        fetch("/report_text/" + encodeURIComponent(fid))
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (d.error) { alert("读取原文失败：" + d.error); return; }
+                readerData = d; readerIdx = 0;
+                document.getElementById("reader-foot").style.display = "";
+                showDrawer(fid);
+                renderReaderPage();
+            });
+    }
+    function renderReaderPage() {
+        var pages = readerData.pages;
+        document.getElementById("reader-body").innerHTML =
+            pages[readerIdx].map(function (t) { return '<p class="reader-para">' + escHtml(t) + "</p>"; }).join("");
+        document.getElementById("reader-pos").textContent = (readerIdx + 1) + " / " + pages.length;
+        document.getElementById("reader-prev").disabled = readerIdx === 0;
+        document.getElementById("reader-next").disabled = readerIdx === pages.length - 1;
+        document.getElementById("reader-body").scrollTop = 0;
+    }
+    function readerTurn(d) {
+        if (!readerData) return;
+        var next = readerIdx + d;
+        if (next < 0 || next >= readerData.pages.length) return;
+        readerIdx = next; renderReaderPage();
+    }
+    function closeReader() {
+        document.getElementById("reader-drawer").classList.remove("open");
+        document.getElementById("reader-backdrop").classList.remove("open");
+    }
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") closeReader();
+    });
+
+    document.addEventListener('submit', function (e) {
+        var btn = e.target.querySelector('button[type="submit"]');
+        if (btn && !btn.classList.contains('is-loading') && !btn.closest('.session-box')) {
+            btn.classList.add('is-loading');
+            btn.setAttribute('aria-busy', 'true');
+        }
+    }, true);
+    </script>
+</body>
+</html>

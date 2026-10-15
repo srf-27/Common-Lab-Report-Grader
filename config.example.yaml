@@ -1,0 +1,39 @@
+llm:
+  backend: "openai"
+  openai:
+    api_key: "DEEPSEEK_API_KEY"   # 环境变量名，程序自动读取该环境变量的值；也可直接填 key 明文（不推荐）
+    model: "deepseek-flash"
+    base_url: "https://api.deepseek.com"
+    max_tokens: 2048
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "qwen2.5:14b"
+  custom:
+    base_url: ""
+    api_key: ""
+    model: ""
+
+ocr:
+  backend: "paddleocr"            # paddleocr（本地）或 api（视觉模型接口）
+  paddleocr:
+    language: "ch"
+  api:
+    api_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    api_key: ""                   # 使用 api 后端时填入
+    api_model: "glm-4v-flash"
+
+grading:
+  batch_size: 1
+  similarity_threshold: 0.70
+  similarity_reject: 0.95
+
+rubric_iteration:
+  max_iterations: 2
+  alert_mismatch_rate: 0.5
+
+extraction:
+  image_context_lines: 2
+
+safety:
+  injection_detect: true
+  content_safety: true

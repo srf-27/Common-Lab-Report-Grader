@@ -1,0 +1,40 @@
+Physics Lab Report: Measuring the Specific Heat Capacity of Aluminum
+
+1. Purpose
+To determine the specific heat capacity of aluminum using the method of mixtures.
+
+2. Theory
+By conservation of energy in an isolated system:
+m_metal × c_metal × (T_metal - T_eq) = m_water × c_water × (T_eq - T_water)
+
+where c_water = 4.186 J/(g·°C)
+
+3. Procedure
+1. Mass of aluminum block measured: 48.7g
+2. Heated in boiling water for 10 minutes
+3. Placed in calorimeter with 120g water at 23.0°C
+4. Equilibrium temperature recorded: 27.2°C
+
+4. Data
+m_al = 48.7 g
+m_water = 120.0 g
+T_initial_al = 100.0 °C
+T_initial_water = 23.0 °C
+T_equilibrium = 27.2 °C
+
+5. Calculation
+48.7 × c × (100.0 - 27.2) = 120.0 × 4.186 × (27.2 - 23.0)
+48.7 × c × 72.8 = 120.0 × 4.186 × 4.2
+3545.4c = 2109.7
+c = 0.595 J/(g·°C)
+
+Hmm, this is quite different from the accepted value of 0.897.
+
+6. Error Discussion
+Heat loss during transfer is the main source of error. The temperature reading may also have parallax error.
+
+7. Conclusion
+The specific heat capacity was found to be 0.595 J/(g·°C). The large discrepancy (33.7%) suggests significant heat loss.
+
+姓名：张三
+学号：2024010001
