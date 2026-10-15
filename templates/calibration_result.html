@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}校准结果 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Rubric 校准对比</h1>
+    <p class="subtitle">教师评分 vs AI 评分，分析差异并优化 Rubric</p>
+</div>
+
+<div class="card">
+    <div class="card-header"><h2>AI 评分结果</h2></div>
+    <pre class="code-block">{{ ai_grading | tojson(indent=2, ensure_ascii=False) }}</pre>
+</div>
+
+<div class="card">
+    <div class="card-header"><h2>校准分析</h2></div>
+    {% if result.raw_response %}
+    <pre class="code-block">{{ result.raw_response }}</pre>
+    {% else %}
+    <h3 class="section-title">一致项 ({{ result.agreements|length }})</h3>
+    <div class="tag-list">
+        {% for item in result.agreements %}
+        <span class="tag tag-success">{{ item }}</span>
+        {% endfor %}
+    </div>
+
+    {% if result.disagreements %}
+    <h3 class="section-title">分歧项 ({{ result.disagreements|length }})</h3>
+    {% for d in result.disagreements %}
+    <div class="disagreement-card">
+        <div class="disagree-header">
+            <strong>{{ d.criterion }}</strong>
+        </div>
+        <div class="disagree-scores">
+            <span class="score-chip teacher">教师: {{ d.teacher_score }}</span>
+            <span class="score-chip ai">AI: {{ d.ai_score }}</span>
+        </div>
+        <p class="disagree-reason"><strong>原因:</strong> {{ d.reason }}</p>
+        <p class="disagree-fix"><strong>建议调整:</strong> {{ d.suggested_rubric_adjustment }}</p>
+    </div>
+    {% endfor %}
+    {% endif %}
+
+    {% if result.suggested_rubric_revisions %}
+    <h3 class="section-title">📝 建议修订后的 Rubric</h3>
+    <pre class="code-block">{{ result.suggested_rubric_revisions }}</pre>
+    {% endif %}
+    {% endif %}
+</div>
+
+<a href="/rubric_review" class="btn btn-primary">← 返回 Rubric</a>
+{% endblock %}

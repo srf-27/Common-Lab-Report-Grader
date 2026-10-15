@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}批次审查 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>评分批次审查</h1>
+    <p class="subtitle">按评分细则逐点审查：可修改等级、选填评语（将作为参照案例进入知识库）</p>
+</div>
+
+<div class="batch-summary">
+    <span class="badge badge-graded">{{ batch|selectattr('status','equalto','graded')|list|length }} 已评分</span>
+    <span class="badge badge-flagged_injection">{{ batch|selectattr('status','equalto','flagged_injection')|list|length }} 注入标记</span>
+    <span class="badge badge-blocked_safety">{{ batch|selectattr('status','equalto','blocked_safety')|list|length }} 安全拦截</span>
+</div>
+
+<form action="/approve_batch" method="post">
+{% for item in batch %}
+<div class="review-card">
+    <div class="review-header">
+        <h3><a href="/report/{{ item.report_id }}">{{ item.report_id }}</a></h3>
+        <div class="review-header-actions">
+            <button type="button" class="btn btn-sm" onclick="openReader('{{ item.report_id }}')">原文</button>
+            <span class="badge badge-{{ item.status }}">{{ item.status }}</span>
+        </div>
+    </div>
+
+    {% if item.status == 'graded' %}
+    {% set st = item.grading.subtotals %}
+    <div class="subtotal-bar">
+        <span>程序化小计：<strong>{{ st.procedural }}</strong></span>
+        <span>语义小计：<strong>{{ st.semantic }}</strong></span>
+        <span>总分：<strong>{{ st.total }}</strong></span>
+    </div>
+    {% if item.image_assignments %}
+    <div class="img-assign-note">🖼️ 已自动挂载 {{ item.image_assignments|length }} 张图片（可在详情页查看）</div>
+    {% endif %}
+    <div class="dim-list">
+        {% for criterion, detail in item.grading.scores.items() %}
+        <div class="dim-review-row">
+            <div class="dim-review-main">
+                <div class="dim-review-title">
+                    <span class="score-criterion">{{ loop.index }}. {{ criterion }}</span>
+                    {% if detail.mechanical %}
+                    <span class="badge badge-mech">机械判决：{{ detail.evidence }}</span>
+                    {% else %}
+                    <select class="level-select" name="adj::{{ item.report_id }}::{{ criterion }}">
+                        {% for lv in ['A', 'B', 'C', 'D'] %}
+                        <option value="{{ lv }}" {% if lv == detail.level %}selected{% endif %}>{{ lv }}</option>
+                        {% endfor %}
+                    </select>
+                    {% endif %}
+                </div>
+                <p class="score-evidence">依据：{{ detail.evidence }}</p>
+                {% if not detail.mechanical %}
+                <p class="score-reasoning">LLM 推断：{{ detail.reasoning }}</p>
+                {% endif %}
+            </div>
+            {% if not detail.mechanical %}
+            <textarea class="reason-input" name="reason::{{ item.report_id }}::{{ criterion }}"
+                      placeholder="教师评语（选填，将随案例进入知识库供后续参照）">{{ detail.teacher_reasoning or '' }}</textarea>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% if item.similarity_warnings %}
+    <div class="warning-bar">
+        相似度警告:
+        {% for w in item.similarity_warnings %}
+        <span>与 {{ w.matched_id }} 相似度 {{ (w.similarity * 100)|round(1) }}%</span>
+        {% endfor %}
+    </div>
+    {% endif %}
+    <div class="review-summary">{{ item.grading.summary }}</div>
+
+    {% elif item.status == 'flagged_injection' %}
+    <div class="alert">🚫 检测到 {{ item.injection_details.match_count }} 处疑似提示词注入</div>
+    {% elif item.status == 'blocked_safety' %}
+    <div class="alert">🚫 内容安全检查未通过</div>
+    {% endif %}
+</div>
+{% endfor %}
+
+<div class="review-actions">
+    <button type="submit" class="btn btn-success btn-lg">通过（保存修改）</button>
+</div>
+</form>
+
+<div class="review-actions">
+    <form action="/reject_batch" method="post" class="inline-form reject-form">
+        <textarea name="corrections" rows="2" placeholder="修改意见（选填，重新评分时将注入 prompt）..."></textarea>
+        <button type="submit" class="btn btn-danger btn-lg">打回重评</button>
+    </form>
+</div>
+{% endblock %}

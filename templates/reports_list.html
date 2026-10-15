@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}报告管理 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>已提取报告</h1>
+    <p class="subtitle">逐份确认提取内容，无误后开始评分</p>
+</div>
+
+{% if reports %}
+<div class="report-cards">
+    {% for r in reports %}
+    <div class="report-card">
+        <div class="report-card-head">
+            <h3>{{ r.meta.filename if r.meta else r.file }}</h3>
+            {% set fn = r.meta.filename if r.meta else r.file %}
+            {% if fn in approved_ids %}<span class="badge badge-ok">已终审 · 入RAG</span>
+            {% elif fn in graded_ids %}<span class="badge badge-archive">已评审</span>
+            {% else %}<span class="badge badge-skipped">待评分</span>{% endif %}
+        </div>
+        <div class="report-card-meta">
+            <span>{{ r.meta.pages if r.meta and r.meta.pages else '-' }} 页</span>
+            <span>{{ r.meta.image_count if r.meta else 0 }} 图</span>
+            <span>{% if r.meta and r.meta.is_scanned %}扫描型（OCR）{% else %}文本型{% endif %}</span>
+        </div>
+        <div class="report-card-actions">
+            {% if fn in graded_ids %}
+            <a href="/grading_done" class="btn btn-sm">查看评分</a>
+            {% endif %}
+            {% if r.status == 'pending_regrade' %}
+            <form action="/regrade/{{ r.meta.filename }}" method="post" class="inline-form">
+                <button type="submit" class="btn btn-warning btn-sm">重新评分（含修改意见）</button>
+            </form>
+            {% endif %}
+            <a href="/report/{{ r.meta.filename }}" class="btn btn-sm">查看详情</a>
+            <button type="button" class="btn btn-sm" onclick="openReader('{{ r.meta.filename if r.meta else r.file }}')">原文</button>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+<div class="action-bar">
+    <a href="/start_grading" class="btn btn-primary btn-lg">开始评分</a>
+</div>
+{% else %}
+<div class="empty-state">
+    <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg></span>
+    <p>暂无报告，请先上传学生实验报告</p>
+    <a href="/" class="btn btn-primary">去上传</a>
+</div>
+{% endif %}
+{% endblock %}
