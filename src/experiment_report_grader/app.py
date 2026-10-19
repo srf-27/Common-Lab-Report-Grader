@@ -214,7 +214,7 @@ def _session_stage():
     running = (state.get("grading_status") or {}).get("phase") == "running"
     if not results or stale:
         label = STAGES[1][1] + ("（评分结果已过期，请重新评分）" if stale else "")
-        return "grading" if running else ("rubric", label)
+        return STAGES[2] if running else ("rubric", label)
     graded = [r for r in results if r.get("status") == "graded"]
     total = len([r for r in state["extracted_reports"] if r.get("status") == "ok"])
     unapproved = [r for r in graded if r["report_id"] not in _approved_ids()]
@@ -284,6 +284,7 @@ def _bootstrap_payload():
         "approved": len(approved),
         "unapproved": len([r for r in results if r["report_id"] not in approved]),
         "mcp": {"mounted": len((state.get("mcp") or {}).get("servers") or [])},
+        "usage": state.get("usage") or {},
         "task": state.get("task"),
         "agreement": ({"n": agreement["overall"]["n"],
                        "cohen_kappa": agreement["overall"]["cohen_kappa"],
@@ -1022,32 +1023,39 @@ def _image_descriptions(entries):
 
 
 def _grade_one(grader, entry, references=""):
+    from .web import usage as usage_store
+
     text = _report_text(entry)
     if not text.strip():
         return None
     filename = entry["meta"]["filename"]
-    images = entry.get("images") or []
-    image_entries = _image_entries(entry)
-    chunks = _chunks(text)
-    chunk_entries = [{"id": f"p{i}", "text": c[:300]} for i, c in enumerate(chunks)]
-    assignments = grader.assign_items(image_entries + chunk_entries, shots_query=text[:1500])
-    text_assignments = {k: v for k, v in assignments.items() if k.startswith("p")}
-    image_assignments = {k: v for k, v in assignments.items() if not k.startswith("p")}
+    # 这段期间的所有模型调用都记到这份报告名下，用于「每份报告成本」
+    usage_store.set_report(filename)
+    try:
+        images = entry.get("images") or []
+        image_entries = _image_entries(entry)
+        chunks = _chunks(text)
+        chunk_entries = [{"id": f"p{i}", "text": c[:300]} for i, c in enumerate(chunks)]
+        assignments = grader.assign_items(image_entries + chunk_entries, shots_query=text[:1500])
+        text_assignments = {k: v for k, v in assignments.items() if k.startswith("p")}
+        image_assignments = {k: v for k, v in assignments.items() if not k.startswith("p")}
 
-    corrections = state["corrections"].get(filename)
-    grade_text = text + (f"\n\n[教师修改意见，本次重评须重点回应] {corrections}" if corrections else "")
-    outcome = grader.grade_single(filename, grade_text,
-                                  image_descriptions=_image_descriptions(image_entries),
-                                  references=references)
-    result = outcome["result"]
-    state["corrections"].pop(filename, None)
-    if result.get("status") == "graded":
-        result["_report_text"] = text
-        result["_report_chunks"] = chunks
-        result["images"] = images
-        result["image_assignments"] = image_assignments
-        result["text_assignments"] = text_assignments
-    return outcome
+        corrections = state["corrections"].get(filename)
+        grade_text = text + (f"\n\n[教师修改意见，本次重评须重点回应] {corrections}" if corrections else "")
+        outcome = grader.grade_single(filename, grade_text,
+                                      image_descriptions=_image_descriptions(image_entries),
+                                      references=references)
+        result = outcome["result"]
+        state["corrections"].pop(filename, None)
+        if result.get("status") == "graded":
+            result["_report_text"] = text
+            result["_report_chunks"] = chunks
+            result["images"] = images
+            result["image_assignments"] = image_assignments
+            result["text_assignments"] = text_assignments
+        return outcome
+    finally:
+        usage_store.set_report(None)
 
 
 def _spawn_grading(target_fn):
@@ -1134,7 +1142,10 @@ def _select_context(error=None):
         hint = f"名册 {n} 人 · 已收报告 {len(candidates)} 份"
         if n != len(candidates):
             hint += f" · 差 {abs(n - len(candidates))} 人，详见「花名册」页"
-    return {"reports": candidates, "graded_ids": graded, "groups": [groups[g] for g in order],
+    statuses = {r["report_id"]: r for r in (state["grader"].results if state["grader"] else [])}
+    stale_ids = {rid for rid, r in statuses.items() if _result_stale(r)}
+    return {"reports": candidates, "graded_ids": graded, "statuses": statuses,
+            "stale_ids": stale_ids, "groups": [groups[g] for g in order],
             "hint": hint, "error": error, "has_rubric": bool(state.get("rubric_json") or state.get("rubric"))}
 
 
@@ -1145,10 +1156,14 @@ def grading_select():
 
 @app.route("/start_grading", methods=["POST"])
 def start_grading():
+    wants_json = "application/json" in (request.headers.get("Accept") or "")
     if not state.get("rubric_json") and not state.get("rubric"):
         return jsonify({"error": "尚未配置评分细则"}), 400
     with state["grading_lock"]:
         if (state.get("grading_status") or {}).get("phase") == "running":
+            if wants_json:
+                return jsonify({"ok": True, "started": 0, "running": True,
+                                "message": "已有评分任务在跑，正在查看进度"})
             return redirect(url_for("grading_progress"))
         selected = set(request.form.getlist("report_ids"))
         approved = _approved_ids()
@@ -1156,6 +1171,9 @@ def start_grading():
                    if r.get("status") == "ok" and r["meta"]["filename"] in selected
                    and r["meta"]["filename"] not in approved]
         if not targets:
+            if wants_json:
+                return jsonify({"ok": False, "started": 0,
+                                "message": "没有可评的报告（可能已终审或已被移除）"})
             return redirect(url_for("grading_select"))
         roster = load_roster()
         seen, conflict = {}, None
@@ -1168,6 +1186,8 @@ def start_grading():
             if key:
                 seen[key] = entry["meta"]["filename"]
         if conflict:
+            if wants_json:
+                return jsonify({"ok": False, "started": 0, "message": conflict})
             return render_template("grading_select.html", **_select_context(error=conflict))
         prev_results = state["grader"].results if state["grader"] else []
         state["grader"] = Grader(state["rubric_json"] or state["rubric"],
@@ -1178,6 +1198,9 @@ def start_grading():
                                    if r["report_id"] not in {t["meta"]["filename"] for t in targets}]
         state["grading_status"] = {"phase": "running", "done": 0, "total": len(targets), "current": ""}
         _spawn_grading(lambda: targets)
+    if wants_json:
+        return jsonify({"ok": True, "started": len(targets),
+                        "files": [t["meta"]["filename"] for t in targets]})
     return redirect(url_for("grading_progress"))
 
 
@@ -1456,6 +1479,36 @@ def api_bootstrap():
     return jsonify(_bootstrap_payload())
 
 
+@app.route("/api/balance")
+def api_balance():
+    from .web import balance as balance_store
+
+    force = request.args.get("refresh") == "1"
+    events = (state.get("usage") or {}).get("events") or []
+    return jsonify(balance_store.refresh(state["config"], events, force=force))
+
+
+@app.route("/api/balance/reset", methods=["POST"])
+def api_balance_reset():
+    from .web import balance as balance_store
+
+    balance_store.reset()
+    events = (state.get("usage") or {}).get("events") or []
+    return jsonify(balance_store.refresh(state["config"], events, force=True))
+
+
+@app.route("/api/usage")
+def api_usage():
+    from .web import usage as usage_store
+
+    try:
+        days = max(0, min(3650, int(request.args.get("days", 1))))
+    except ValueError:
+        days = 1
+    model = (request.args.get("model") or "").strip() or None
+    return jsonify(usage_store.payload(session_dir(), days, model))
+
+
 @app.route("/api/rubric")
 def api_rubric():
     rubric = state.get("rubric_json")
@@ -1525,7 +1578,9 @@ def api_select():
                                  "paragraphs": r["meta"].get("paragraphs"),
                                  "images": r["meta"].get("image_count") or 0,
                                  "scanned": bool(r["meta"].get("is_scanned")),
-                                 "graded": r["meta"]["filename"] in ctx["graded_ids"]}
+                                 "graded": r["meta"]["filename"] in ctx["graded_ids"],
+                                 "stale": r["meta"]["filename"] in ctx["stale_ids"],
+                                 "status": (ctx["statuses"].get(r["meta"]["filename"]) or {}).get("status", "")}
                                 for r in g["reports"]]} for g in ctx["groups"]],
         "hint": ctx["hint"],
         "hasRubric": ctx["has_rubric"],

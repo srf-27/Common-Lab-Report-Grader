@@ -7,6 +7,7 @@ import threading
 import time
 
 from ..nodes import rubric_io
+from .usage import load as load_usage
 from ..nodes.grader import Grader
 from ..factory import llm
 from ..utils.llm_client import load_config
@@ -36,6 +37,7 @@ state = {
     "approved_ids": set(),
     "mcp": {"servers": [], "resources": [], "search_tool": "", "prompt": "", "max_chars": 4000},
     "mcp_status": [],
+    "usage": {"cost": 0.0, "tokens_in": 0, "tokens_out": 0, "calls": 0, "model": "", "seq": 0},
 }
 
 
@@ -156,6 +158,7 @@ def hydrate_session(sid):
     state["calibration"] = None
     state["grading_status"] = None
     state["mcp_status"] = []
+    state["usage"] = load_usage(session_dir(sid))
     for sub in SUBDIRS:
         os.makedirs(os.path.join(SESSIONS_DIR, sid, sub), exist_ok=True)
 

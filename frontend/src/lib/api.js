@@ -36,6 +36,13 @@ function toForm(fields) {
 export const postForm = (url, fields) =>
   fetch(url, { method: "POST", body: toForm(fields) }).then(parse);
 
+export const postFormJSON = (url, fields) =>
+  fetch(url, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+    body: toForm(fields),
+  }).then(parse);
+
 export const postJSON = (url, body) =>
   fetch(url, {
     method: "POST",

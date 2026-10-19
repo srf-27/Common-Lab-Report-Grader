@@ -12,22 +12,7 @@ from ..utils.privacy import anonymize_text
 from . import verifier
 from .rubric_io import LEVEL_POINTS, LEVELS, compute_subtotals
 
-GRADING_PROMPT = """你是实验报告评阅专家。只按下列评分维度与等级描述判级，不得新增维度。
-
-## 评分维度
-{criteria_block}
-
-## 已终审范例（仅用于对齐等级边界与判据强度；本报告无对应证据时不得照抄结论）
-{exemplar_shots}
-
-## 学科参考资料（插件提供，仅作事实核对）
-{references}
-
-## 报告正文
-{report_text}
-
-## 报告图片说明
-{image_descriptions}
+GRADING_SYSTEM = """你是实验报告评阅专家。只按下面给出的评分维度与等级描述判级，不得新增维度。
 
 ## 判定规则
 1. 每个维度给出 A/B/C/D/E 之一 + 报告中可直接引用的证据 + 该证据为何对应该级的简短说明。
@@ -37,8 +22,29 @@ GRADING_PROMPT = """你是实验报告评阅专家。只按下列评分维度与
 5. 内容缺失/未做才给 E；表述含糊、证据不足以判断质量时给 C，并在 evidence 写「证据不足」。
 
 只输出一个 JSON 对象，不要代码围栏：
-{{"scores": {{"维度名": {{"level": "A", "evidence": "原文引用", "reasoning": "为何是该级"}}}},
-  "summary": "2-3 句总评", "flags": []}}"""
+{"scores": {"维度名": {"level": "A", "evidence": "原文引用", "reasoning": "为何是该级"}},
+  "summary": "2-3 句总评", "flags": []}"""
+
+# 固定内容全部排在前面：评分维度 → 学科资料；每份报告不同的部分（历史参考、范例、正文、图片）放最后
+GRADING_USER = """## 评分维度
+{criteria_block}
+
+## 学科参考资料（插件提供，仅作事实核对）
+{references}
+
+## 本报告相关的历史参考（同维度、已终审）
+{dimension_notes}
+
+## 已终审范例（仅用于对齐等级边界与判据强度；本报告无对应证据时不得照抄结论）
+{exemplar_shots}
+
+## 报告正文
+{report_text}
+
+## 报告图片说明
+{image_descriptions}
+
+按系统消息里的规则与 JSON 结构输出。"""
 
 
 def _parse_json(text):
@@ -238,17 +244,24 @@ class Grader:
         return len(pending)
 
     # ---------- 提示词组装 ----------
-    def _criteria_block(self, criteria, query_text=""):
+    def _criteria_block(self, criteria):
+        """只输出维度本身：这部分在同一门课的所有报告里完全一致，放在前面对前缀缓存友好。"""
         blocks = []
         for c in criteria:
             lv = c.get("levels") or {}
-            block = (f"### {c['name']}（权重 {c.get('weight')}%，标准文档位置：{c.get('doc_ref', '未标注')}）\n"
-                     + "\n".join(f"- {name}: {lv.get(name, '')}" for name in LEVELS))
+            blocks.append(
+                f"### {c['name']}（权重 {c.get('weight')}%，标准文档位置：{c.get('doc_ref', '未标注')}）\n"
+                + "\n".join(f"- {name}: {lv.get(name, '')}" for name in LEVELS))
+        return "\n\n".join(blocks)
+
+    def _dimension_notes(self, criteria, query_text):
+        """每份报告不同的维度历史片段：放在提示词尾部，避免打断可缓存的前缀。"""
+        parts = []
+        for c in criteria:
             references = self._dimension_references(c["name"], query_text) if query_text else ""
             if references:
-                block += f"\n历史参考样本（同维度，已终审）：\n{references}"
-            blocks.append(block)
-        return "\n\n".join(blocks)
+                parts.append(f"### {c['name']}\n{references}")
+        return "\n\n".join(parts) or "（暂无）"
 
     # ---------- 机械判决 ----------
     def _verifier(self):
@@ -305,12 +318,12 @@ class Grader:
                                      n_cases=1, max_chars=600)
         prompt = (
             "把下面每一条内容归入最相关的评分维度。评分维度：" + "、".join(names)
-            + (f"\n参考范例（已终审，仅供对齐维度粒度）：\n{shots}" if shots else "")
-            + "\n待归类内容（JSON）：" + json.dumps(items, ensure_ascii=False)
             + "\n规则：每条只能归入一个最相关维度。表格、数据记录、公式推导、计算过程、实验步骤都是正文，"
               "必须归入对应维度；只有不含实质内容的封面/页眉元信息（实验名称、姓名、学号、班级、日期）才填 null。"
               "拿不准时归入最相关维度，禁止因为内容是表格或公式而填 null。"
               "\n只输出 JSON：{\"assignments\": [{\"id\": \"...\", \"criterion\": \"...\"}]}"
+            + (f"\n参考范例（已终审，仅供对齐维度粒度）：\n{shots}" if shots else "")
+            + "\n待归类内容（JSON）：" + json.dumps(items, ensure_ascii=False)
         )
         try:
             data = _parse_json(self.llm.chat([{"role": "user", "content": prompt}], temperature=0.1))
@@ -341,15 +354,19 @@ class Grader:
         self._remember_report(report_id, text)
         scores, fallback = self._verify_mechanical(text)
         semantic = [c for c in self.rubric.get("criteria", []) if c["name"] not in scores] + fallback
-        prompt = GRADING_PROMPT.format(
-            criteria_block=self._criteria_block(semantic, query_text=text),
+        # 系统消息与维度块在同一门课内完全一致：稳定前缀越长，供应商的前缀缓存命中越多
+        user_prompt = GRADING_USER.format(
+            criteria_block=self._criteria_block(semantic),
+            dimension_notes=self._dimension_notes(semantic, text),
             exemplar_shots=self._exemplar_shots(text) or "（暂无已终审范例）",
             references=references or "（无插件参考）",
             report_text=text[:8000],
             image_descriptions=image_descriptions or "（本报告无图片）",
         )
         try:
-            grading = _parse_json(self.llm.chat([{"role": "user", "content": prompt}], temperature=0.1))
+            grading = _parse_json(self.llm.chat(
+                [{"role": "system", "content": GRADING_SYSTEM},
+                 {"role": "user", "content": user_prompt}], temperature=0.1))
         except Exception as e:
             grading = {"error": str(e)[:200]}
         # 完全没有可解析的分数时不伪造 C：标记失败，交人工

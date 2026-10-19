@@ -60,3 +60,6 @@ htmlcov/
 # 根目录生成物（一致性报告等）
 /output/
 
+
+# 临时向量库（脚本探测时生成）
+src/experiment_report_grader/embedding/db/
