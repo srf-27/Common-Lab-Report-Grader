@@ -12,15 +12,15 @@
 
 ## 目录
 
-| 我想…… | 看这里 |
-|---|---|
-| 先看看它长什么样 | [界面预览](#界面预览) |
-| 马上把它跑起来 | [5 分钟跑起来](#5-分钟跑起来) |
-| 第一次用，不知道点哪 | [第一次使用的完整流程](#第一次使用的完整流程) |
-| 报错了 | [常见问题](#常见问题) |
-| 改模型 / 改 OCR / 改向量库 | [配置速查](#配置速查) |
-| 给评分加学科参考（MCP） | [MCP 插件](#mcp-插件) |
-| 做二次开发 | [项目结构](#项目结构) · [开发与测试](#开发与测试) |
+| 我想……               | 看这里                             |
+| ------------------ | ------------------------------- |
+| 先看看它长什么样           | [界面预览](#界面预览)                   |
+| 马上把它跑起来            | [5 分钟跑起来](#5-分钟跑起来)             |
+| 第一次用，不知道点哪         | [第一次使用的完整流程](#第一次使用的完整流程)       |
+| 报错了                | [常见问题](#常见问题)                   |
+| 改模型 / 改 OCR / 改向量库 | [配置速查](#配置速查)                   |
+| 给评分加学科参考（MCP）      | [MCP 插件](#mcp-插件)               |
+| 做二次开发              | [项目结构](#项目结构) · [开发与测试](#开发与测试) |
 
 ---
 
@@ -76,11 +76,11 @@
 
 ### 0. 先确认你装了什么
 
-| 需要 | 版本 | 怎么确认 |
-|---|---|---|
-| Python | 3.10 以上 | `python --version` |
-| Node.js（只用于构建前端，装一次就行） | 18 以上 | `node --version` |
-| 一个大模型的 API Key | OpenAI 兼容即可（DeepSeek、通义、SiliconFlow、vLLM…） | 去对应平台申请 |
+| 需要                     | 版本                                         | 怎么确认               |
+| ---------------------- | ------------------------------------------ | ------------------ |
+| Python                 | 3.10 以上                                    | `python --version` |
+| Node.js（只用于构建前端，装一次就行） | 18 以上                                      | `node --version`   |
+| 一个大模型的 API Key         | OpenAI 兼容即可（DeepSeek、通义、SiliconFlow、vLLM…） | 去对应平台申请            |
 
 > 只是想看界面、暂不评分？可以跳过第 3 步的 Key，除「生成细则 / 评分」外的页面都能正常打开。
 
@@ -119,7 +119,7 @@ cd ..
 
 成功的话最后会打印类似 `✓ built in 1.5s`，并生成 `src/experiment_report_grader/static/ui/`。
 
-> `npm install` 慢或超时，先换国内镜像：`npm config set registry https://registry.npmmirror.com`。
+> `npm install` 慢或超时，先换国内镜像：`npm config set registry https://registry.npmmirror.com`。>   
 > 如果 `npm` 命令不存在，说明 Node.js 没装好，去 [nodejs.org](https://nodejs.org/) 装 LTS 版。
 
 ### 3. 配置模型
@@ -181,6 +181,7 @@ python run.py --port 8080 --host 0.0.0.0
 进入 **评分细则**，选择课程的评分标准（`.docx` / `.pdf` / `.txt`），点「上传并生成细则」。模型会把标准拆成维度，通常 1–3 分钟。
 
 生成后逐维度检查：
+
 - **权重**：保存时自动归一到 100%，不用自己凑数；
 - **A–E 判据**：写得越具体，判级越稳；
 - **补全**按钮：只补空着的字段，不会覆盖你改过的内容；
@@ -191,6 +192,7 @@ python run.py --port 8080 --host 0.0.0.0
 ### ② 上传实验报告
 
 进入 **实验报告**，可以多选文件，也可以直接丢一个 `.zip` / `.rar` / `.7z` 压缩包。系统会：
+
 - 提取正文、插图、学生信息（姓名/学号/班级，按花名册表头来）；
 - 扫描件/无文本 PDF 自动走 OCR；
 - 同一份报告重复上传时自动去重。
@@ -200,6 +202,7 @@ python run.py --port 8080 --host 0.0.0.0
 ### ③ 选择报告 → 开始评分
 
 进入 **选择评分**，勾选这次要评的报告，点右下角「开始评分」。
+
 - 同一学生有多份时只能选一份（选了第二份会自动取消第一份）；
 - 已终审的报告不会出现在列表里；
 - 评分在后台跑，可以离开这个页面，回工作台能看到进度。
@@ -219,49 +222,49 @@ python run.py --port 8080 --host 0.0.0.0
 
 ### ⑤ 可选的三个加分项
 
-| 功能 | 什么时候用 |
-|---|---|
-| **花名册** | 想让系统自动列「谁没交」「谁学号不在名单里」。上传 `.xlsx/.csv`，表头决定提取和导出列。 |
-| **评分校准** | 觉得 AI 判得和你差太多。上传一份你已经判过的报告，填上教师等级，系统给出逐维度分歧原因和细则修订建议。 |
-| **插件（MCP）** | 有学科参考服务（比如物理实验的不确定度规范），想让评分时带上这些资料。 |
+| 功能          | 什么时候用                                                 |
+| ----------- | ----------------------------------------------------- |
+| **花名册**     | 想让系统自动列「谁没交」「谁学号不在名单里」。上传 `.xlsx/.csv`，表头决定提取和导出列。    |
+| **评分校准**    | 觉得 AI 判得和你差太多。上传一份你已经判过的报告，填上教师等级，系统给出逐维度分歧原因和细则修订建议。 |
+| **插件（MCP）** | 有学科参考服务（比如物理实验的不确定度规范），想让评分时带上这些资料。                   |
 
 ---
 
 ## 常见问题
 
-| 现象 | 原因与处理 |
-|---|---|
-| 打开是空白页 / 404 | 前端还没构建。执行 `cd frontend && npm install && npm run build`，再刷新。 |
-| 端口被占用（`Address already in use`） | 换端口：`python run.py --port 5001` |
-| 页面能开，生成细则报错 | 「配置」页检查 Base URL / 模型名 / API Key；`api_key` 填的是环境变量名时，确认该变量真的设置了。 |
-| 细则维度全被丢弃 | 模型没给出「标准文档位置」。换个更强的模型重试，或在细则页手动新增维度后逐格「补全」。 |
-| 评分结果全是 C，提示「LLM 未返回该维度」 | 模型输出不是 JSON。换模型重试，或对这份报告「打回重评」。 |
-| 报告状态 `模型失败` | 同上，未返回可解析的 JSON；报告不计入成绩，可直接重评。 |
-| 首次 OCR 特别慢 | paddleocr 首次会加载/下载模型，之后就快了。 |
-| Chroma 报错（库被占用） | 本地向量库在 `data/output/sessions/<课程>/kb_db`，关掉旧的 python 进程再启动。 |
-| 判分和我的标准差很远 | 用「评分校准」上传一份教师已判的报告，对比分歧后改细则。 |
-| 想清空重来 | 工作台底部「删除当前课程」（会连报告、成绩、向量库一起删，不可撤销）。 |
+| 现象                              | 原因与处理                                                            |
+| ------------------------------- | ---------------------------------------------------------------- |
+| 打开是空白页 / 404                    | 前端还没构建。执行 `cd frontend && npm install && npm run build`，再刷新。     |
+| 端口被占用（`Address already in use`） | 换端口：`python run.py --port 5001`                                  |
+| 页面能开，生成细则报错                     | 「配置」页检查 Base URL / 模型名 / API Key；`api_key` 填的是环境变量名时，确认该变量真的设置了。 |
+| 细则维度全被丢弃                        | 模型没给出「标准文档位置」。换个更强的模型重试，或在细则页手动新增维度后逐格「补全」。                      |
+| 评分结果全是 C，提示「LLM 未返回该维度」         | 模型输出不是 JSON。换模型重试，或对这份报告「打回重评」。                                  |
+| 报告状态 `模型失败`                     | 同上，未返回可解析的 JSON；报告不计入成绩，可直接重评。                                   |
+| 首次 OCR 特别慢                      | paddleocr 首次会加载/下载模型，之后就快了。                                      |
+| Chroma 报错（库被占用）                 | 本地向量库在 `data/output/sessions/<课程>/kb_db`，关掉旧的 python 进程再启动。      |
+| 判分和我的标准差很远                      | 用「评分校准」上传一份教师已判的报告，对比分歧后改细则。                                     |
+| 想清空重来                           | 工作台底部「删除当前课程」（会连报告、成绩、向量库一起删，不可撤销）。                              |
 
 ---
 
 ## 配置速查
 
-| 键 | 说明 | 默认 |
-|---|---|---|
-| `llm.backend` | `openai` / `ollama` / `custom`（配置页可切换） | `openai` |
-| `llm.openai.api_key` | 环境变量名或明文 key（先查同名环境变量） | `DEEPSEEK_API_KEY` |
-| `llm.openai.base_url` / `model` / `max_tokens` | 接口地址、模型名、单次输出上限 | — |
-| `llm.ollama.base_url` / `model` | 本地 Ollama 地址与模型 | `http://localhost:11434` / — |
-| `llm.custom.base_url` / `api_key` / `model` | 自定义 HTTP 网关 | — |
-| `ocr.backend` | `paddleocr`（本地）或 `api`（视觉大模型） | `paddleocr` |
-| `ocr.paddleocr.language` | OCR 语言 | `ch` |
-| `ocr.api.api_url/api_key/api_model` | 视觉 OCR 接口 | — |
-| `grading.similarity_threshold` | 全文相似度告警线 | `0.92` |
-| `grading.similarity_reject` | 判为高度重复的线 | `0.97` |
-| `grading.ocr_images` | 是否对报告插图跑 OCR（结果缓存在 `reports/*/.ocr/`） | `false` |
-| `vector_store.backend` | 向量库类型 | `chroma` |
-| `vector_store.chroma.mode` | `local`（每课程独立目录）或 `cloud`（Chroma Server） | `local` |
-| `vector_store.embedding.backend` | `default`（内置离线）或 `openai`（`/embeddings`） | `default` |
+| 键                                              | 说明                                       | 默认                           |
+| ---------------------------------------------- | ---------------------------------------- | ---------------------------- |
+| `llm.backend`                                  | `openai` / `ollama` / `custom`（配置页可切换）   | `openai`                     |
+| `llm.openai.api_key`                           | 环境变量名或明文 key（先查同名环境变量）                   | `DEEPSEEK_API_KEY`           |
+| `llm.openai.base_url` / `model` / `max_tokens` | 接口地址、模型名、单次输出上限                          | —                            |
+| `llm.ollama.base_url` / `model`                | 本地 Ollama 地址与模型                          | `http://localhost:11434` / — |
+| `llm.custom.base_url` / `api_key` / `model`    | 自定义 HTTP 网关                              | —                            |
+| `ocr.backend`                                  | `paddleocr`（本地）或 `api`（视觉大模型）            | `paddleocr`                  |
+| `ocr.paddleocr.language`                       | OCR 语言                                   | `ch`                         |
+| `ocr.api.api_url/api_key/api_model`            | 视觉 OCR 接口                                | —                            |
+| `grading.similarity_threshold`                 | 全文相似度告警线                                 | `0.92`                       |
+| `grading.similarity_reject`                    | 判为高度重复的线                                 | `0.97`                       |
+| `grading.ocr_images`                           | 是否对报告插图跑 OCR（结果缓存在 `reports/*/.ocr/`）    | `false`                      |
+| `vector_store.backend`                         | 向量库类型                                    | `chroma`                     |
+| `vector_store.chroma.mode`                     | `local`（每课程独立目录）或 `cloud`（Chroma Server） | `local`                      |
+| `vector_store.embedding.backend`               | `default`（内置离线）或 `openai`（`/embeddings`） | `default`                    |
 
 > `config/config.yaml`、`embedding/*`、`utils/{llm_client,file_parser,doc_reader,ocr_engine}.py`、`nodes/report_extractor.py` 文件首行标了 `checked`，属于受保护文件：改造时不改，能力扩展走新模块。
 
@@ -315,17 +318,17 @@ servers:
 
 ### 模型失败时怎么办（兜底矩阵）
 
-| 环节 | 失败后的行为 |
-|---|---|
-| 提示注入检测 | 标记 `detection_failed`，转人工，不评分 |
-| 注入检测文本超 2 万字符 | 标记 `audit_truncated`，转人工，不静默放行 |
-| 内容安全 | fail-open 放行，但记录「安全检测失败」 |
-| 隐私脱敏 | 回退正则兜底（隐私是红线，必须替换） |
-| 细则生成 | 没有「标准文档位置」的维度直接丢弃并警告；一个都不剩则任务失败 |
-| 维度归类 | 返回空，内容进「未挂载内容」，评分继续 |
-| 报告评分 | 无可用分数 → `llm_failed`，不计入成绩，可一键重评 |
-| 学生信息提取 | 字段留空，人工在页面补 |
-| MCP 工具/资源/提示词 | 单台失败只写状态，参考为空，评分继续 |
+| 环节            | 失败后的行为                           |
+| ------------- | -------------------------------- |
+| 提示注入检测        | 标记 `detection_failed`，转人工，不评分    |
+| 注入检测文本超 2 万字符 | 标记 `audit_truncated`，转人工，不静默放行   |
+| 内容安全          | fail-open 放行，但记录「安全检测失败」         |
+| 隐私脱敏          | 回退正则兜底（隐私是红线，必须替换）               |
+| 细则生成          | 没有「标准文档位置」的维度直接丢弃并警告；一个都不剩则任务失败  |
+| 维度归类          | 返回空，内容进「未挂载内容」，评分继续              |
+| 报告评分          | 无可用分数 → `llm_failed`，不计入成绩，可一键重评 |
+| 学生信息提取        | 字段留空，人工在页面补                      |
+| MCP 工具/资源/提示词 | 单台失败只写状态，参考为空，评分继续               |
 
 不依赖模型的部分（权重归一、小计、相似度、导出、花名册匹配）不受影响。
 
@@ -387,13 +390,16 @@ cd frontend && npm run dev
 cd frontend && npm run build
 ```
 
+
+````
+
 `python run.py` 默认跑在 5000；前端开发服务器默认 5174，代理目标写在 `frontend/vite.config.js`，需要后端跑在 5055（`python run.py --port 5055`）。
 
 基准跑批（调用真实模型，会产生费用）：
 
 ```bash
 python tests/integration/bench_run.py tests/fixtures/bench/cn_lab
-```
+````
 
 OCR 自检：
 
