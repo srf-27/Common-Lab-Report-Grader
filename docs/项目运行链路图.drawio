@@ -1,0 +1,145 @@
+<mxfile host="app.diagrams.net" agent="Experiment-Report-Grader" version="24.0.0">
+  <diagram id="experiment-report-grader-flow" name="项目运行链路图">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="980" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- 标题 -->
+        <mxCell id="title" value="实验报告智能评分系统 · 运行链路图" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=18;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="5" width="440" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 主流程节点（左列，纵向） ===== -->
+        <mxCell id="s1" value="① 上传评分标准文档" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#4285f4;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="40" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="② 生成评分细则（Rubric）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#4285f4;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="136" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="③ 保存细则到会话" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#4285f4;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="232" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" value="④ 上传学生报告" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#4285f4;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="328" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s5" value="⑤ 提取文本 / 图片（OCR）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f0fe;strokeColor=#4285f4;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="424" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s6" value="⑥ 逐维度评分" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#f9ab00;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="520" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s7" value="⑦ 批次审查 · 教师修正" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef7e0;strokeColor=#f9ab00;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="616" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s8" value="⑧ 终审 · 脱敏入 RAG" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#7b1fa2;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="712" width="280" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="s9" value="⑨ 导出结果 · 一致性分析" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#7b1fa2;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="60" y="808" width="280" height="56" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 主流程箭头（纵向） ===== -->
+        <mxCell id="a1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#4285f4;" edge="1" parent="1" source="s1" target="s2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#4285f4;" edge="1" parent="1" source="s2" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#4285f4;" edge="1" parent="1" source="s3" target="s4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#4285f4;" edge="1" parent="1" source="s4" target="s5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#f9ab00;" edge="1" parent="1" source="s5" target="s6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#f9ab00;" edge="1" parent="1" source="s6" target="s7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#f9ab00;" edge="1" parent="1" source="s7" target="s8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a8" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;strokeWidth=2;strokeColor=#7b1fa2;" edge="1" parent="1" source="s8" target="s9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 右侧说明列（模块/输入输出） ===== -->
+        <mxCell id="d1" value="页面：rubric_review.html&lt;br&gt;路由：/upload_criteria、/process_criteria&lt;br&gt;输入：评分标准 .txt/.md/.pdf/.docx" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="40" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d2" value="模块：nodes/rubric_generator.py&lt;br&gt;调用：utils/llm_client.py（LLM 生成结构化细则）&lt;br&gt;输出：Rubric 表格（维度/权重/等级描述）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="136" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d3" value="存储：data/output/sessions/&lt;课程ID&gt;/rubrics/&lt;br&gt;模块：nodes/rubric_io.py（权重归一化/读写）&lt;br&gt;（可选）校准模式：教师打分 vs AI 打分" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="232" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d4" value="页面：reports_list.html&lt;br&gt;路由：/upload_reports、/process_reports&lt;br&gt;输入：学生报告 PDF/DOCX/压缩包（自动去重）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="328" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d5" value="模块：nodes/report_extractor.py&lt;br&gt;调用：utils/file_parser.py、utils/ocr_engine.py&lt;br&gt;输出：text.md 提取文本 + images/ 图片" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="424" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d6" value="模块：nodes/grader.py（LLM 逐维度评级）&lt;br&gt;辅助：nodes/verifier.py（机械判定）、utils/injection_detector.py、content_safety.py、similarity.py&lt;br&gt;输出：grading_results.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="520" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d7" value="页面：review_batch.html、grading_done.html&lt;br&gt;路由：/approve_batch、/update_scores、/regrade&lt;br&gt;操作：教师修改等级/评语、查看原文" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="616" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d8" value="模块：utils/privacy.py（脱敏姓名/学号等）&lt;br&gt;模块：embedding/chroma.py（写入会话级 kb_db）&lt;br&gt;结果：优秀案例成为 RAG 参考" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="712" width="470" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="d9" value="模块：nodes/agreement.py（Cohen's Kappa 一致性）&lt;br&gt;导出：/download（Excel 汇总表 / 评分 JSON）&lt;br&gt;输出：Kappa 报告 / 基准评测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="430" y="808" width="470" height="56" as="geometry" />
+        </mxCell>
+
+        <!-- 主流程与说明列之间的连接线（轻量虚线） -->
+        <mxCell id="l1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s1" target="d1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s2" target="d2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s3" target="d3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s4" target="d4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s5" target="d5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l6" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s6" target="d6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l7" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s7" target="d7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l8" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s8" target="d8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="l9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=none;dashed=1;strokeWidth=1;strokeColor=#bbbbbb;" edge="1" parent="1" source="s9" target="d9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ===== 底部：数据层 & 外部服务 ===== -->
+        <mxCell id="dlab" value="数据层 &amp; 外部服务" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=13;fontStyle=1;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="880" width="200" height="26" as="geometry" />
+        </mxCell>
+        <mxCell id="dl1" value="运行时数据&lt;br&gt;data/output/sessions/" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#7b1fa2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="260" y="884" width="190" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="dl2" value="配置文件&lt;br&gt;config/config.yaml" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#7b1fa2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="480" y="884" width="190" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="dl3" value="外部 LLM / OCR 服务&lt;br&gt;OpenAI / Ollama / 视觉模型" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#7b1fa2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="700" y="884" width="190" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="dl4" value="Chroma 向量库&lt;br&gt;（RAG 优秀案例）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8fd;strokeColor=#7b1fa2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="920" y="884" width="190" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -2,28 +2,65 @@
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
 
-# 运行时数据（评分结果、上传原件、课程索引）
-output/
-uploads/
+# Environment
+.env
 
-# 私有配置（含 API Key，仓库只保留 config.example.yaml）
-config.yaml
+# Runtime data (grading results, uploads, course index)
+data/output/
+data/uploads/
 
-# 业务资料
-材料/
+# Private config (contains API keys, repo only keeps config/config.example.yaml)
+config/config.yaml
 
-# 临时文件
+# Business materials
+docs/materials/
+
+# Temporary files
 _calib.html
 *.log
+*.tmp
 
-# 工具目录
+# Tools & IDE
+frontend/node_modules/
+src/experiment_report_grader/static/ui/
 .workbuddy/
 node_modules/
 .idea/
+.vscode/
+*.swp
+*.swo
 
-# 运行时向量库（含学生报告内容）
-knowledge_base/db/
+# Runtime vector database (contains student report content)
+src/experiment_report_grader/knowledge_base/db/
 
-# 含真实学生姓名的存档报告
-test_data/archived_upload_*
+# Archived reports with real student names
+tests/fixtures/data/archived_upload_*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test coverage
+htmlcov/
+.coverage
+.coverage.*
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# 根目录生成物（一致性报告等）
+/output/
+
+# 个人材料（简历 / 面试稿，不入库）
+简历*
+项目经历*
+实现skill*

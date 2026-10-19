@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}校准打分 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">工作台</a> / <a href="/rubric_review">评分细则</a> / 校准打分</p>
+  <h1>校准打分</h1>
+  <p class="subtitle">示例报告：{{ filename }}。每段原文已挂到最相关的维度，逐维度读原文并给出等级；提交后与 AI 判定对比。</p>
+</div>
+
+<form action="/rubric_calibrate" method="post">
+  {% for row in rows %}
+  {% set c = row.criterion %}
+  <section class="group">
+    <div class="group-head">
+      <h2>{{ loop.index }}. {{ c.name }}</h2>
+      <span class="note">权重 {{ c.weight }}%{% if c.doc_ref %} · {{ c.doc_ref }}{% endif %}</span>
+    </div>
+    <div class="group-body">
+      {% if row.paragraphs %}
+      {% for p in row.paragraphs %}<div class="chunk" data-md>{{ p }}</div>{% endfor %}
+      {% else %}
+      <p class="footnote">没有原文段落挂到该维度，可结合整篇报告判断。</p>
+      {% endif %}
+
+      <fieldset class="fieldset">
+        <legend class="label">你的等级</legend>
+        <div class="choice-group">
+          {% for lv in ['A','B','C','D','E'] %}
+          <label class="choice">
+            <input type="radio" name="teacher_level::{{ c.name }}" value="{{ lv }}" required>
+            <span>{{ lv }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </fieldset>
+
+      <div class="field" style="margin-top:var(--space-3)">
+        <label for="reason-{{ loop.index }}">评分理由（选填）</label>
+        <input class="input" id="reason-{{ loop.index }}" type="text" name="teacher_reason::{{ c.name }}"
+               placeholder="写出你判此级的依据">
+      </div>
+    </div>
+  </section>
+  {% endfor %}
+
+  {% if rest %}
+  <details class="disclosure">
+    <summary>未挂载内容 <span class="note">{{ rest|length }} 段</span></summary>
+    <div class="disclosure-body">
+      {% for p in rest %}<div class="chunk" data-md>{{ p }}</div>{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+
+  <div class="btn-row">
+    <button type="submit" class="btn filled">提交并与 AI 对比</button>
+    <a href="/rubric_review" class="btn bordered">取消</a>
+  </div>
+</form>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll(".chunk[data-md]").forEach(function (el) {
+    el.innerHTML = renderReaderBlock(el.textContent);
+  });
+  document.querySelectorAll(".chunk").forEach(function (el) { renderMathIn(el); });
+});
+</script>
+{% endblock %}
