@@ -64,3 +64,6 @@ htmlcov/
 简历*
 项目经历*
 实现skill*
+
+# 临时向量库（脚本探测时生成）
+src/experiment_report_grader/embedding/db/
