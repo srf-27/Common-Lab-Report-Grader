@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useRoute } from "./lib/router";
 import { useApp } from "./lib/store";
 import { Button, Field, Icon, IconButton, Sheet, Spinner } from "./ui";
+import { CostMeter } from "./ui/cost";
 import Workbench from "./pages/Workbench";
 import Rubric from "./pages/Rubric";
 import Reports from "./pages/Reports";
@@ -12,6 +13,7 @@ import Results from "./pages/Results";
 import Roster from "./pages/Roster";
 import Calibration from "./pages/Calibration";
 import Mcp from "./pages/Mcp";
+import Usage from "./pages/Usage";
 import Settings from "./pages/Settings";
 
 const GROUPS = [
@@ -30,6 +32,7 @@ const GROUPS = [
     items: [
       { to: "/app/calibration", label: "评分校准", icon: "calibration" },
       { to: "/app/mcp", label: "插件", icon: "mcp", count: (b) => b.mcp.mounted },
+      { to: "/app/usage", label: "用量统计", icon: "usage" },
       { to: "/app/settings", label: "配置", icon: "settings" },
     ],
   },
@@ -58,6 +61,7 @@ const TITLES = {
   "/app/roster": "花名册",
   "/app/calibration": "评分校准",
   "/app/mcp": "插件",
+  "/app/usage": "用量统计",
   "/app/settings": "配置",
 };
 
@@ -71,6 +75,7 @@ const ROUTES = {
   "/app/roster": Roster,
   "/app/calibration": Calibration,
   "/app/mcp": Mcp,
+  "/app/usage": Usage,
   "/app/settings": Settings,
 };
 
@@ -330,6 +335,8 @@ export default function App() {
           </Button>
         </div>
       </Sheet>
+
+      <CostMeter />
 
       <Sheet
         open={creating}
