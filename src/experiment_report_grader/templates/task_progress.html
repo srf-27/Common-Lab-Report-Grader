@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}任务进行中 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">工作台</a> / 后台处理</p>
+  <h1>{{ '正在生成评分细则' if task.kind == 'criteria' else '正在提取报告内容' }}</h1>
+  <p class="subtitle">文件已上传，以下为后台处理进度。可以返回工作台，任务会继续执行。</p>
+</div>
+
+<div class="group progress-card">
+  <div class="group-body">
+    <div class="progress-head">
+      <h2 id="stage">{{ task.stage }}</h2>
+      <span class="progress-count" id="pct">{{ task.progress }}%</span>
+    </div>
+    <div class="track" role="progressbar" aria-label="处理进度" aria-valuemin="0" aria-valuemax="100"
+         aria-valuenow="{{ task.progress }}" id="track">
+      <i id="fill" class="{% if task.progress == 0 %}indeterminate{% endif %}"
+         style="width: {{ task.progress if task.progress > 0 else 100 }}%"></i>
+    </div>
+    <p class="progress-line" id="detail">{{ task.detail }}</p>
+    <p class="progress-line" id="count">{% if task.total %}{{ task.done }}/{{ task.total }} 份{% endif %}</p>
+    <p class="progress-line" id="elapsed">已用时 0 秒</p>
+    <div class="note-box danger" id="error" hidden><div></div></div>
+    <div class="btn-row" style="margin-top:var(--space-4)">
+      <button type="button" class="btn bordered" id="cancel">取消任务</button>
+      <a href="/" class="btn plain">返回工作台</a>
+      <a href="{{ task.redirect }}" class="btn plain" id="done-link" hidden>查看结果</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var fill = document.getElementById("fill"), pct = document.getElementById("pct");
+  var stage = document.getElementById("stage"), detail = document.getElementById("detail");
+  var count = document.getElementById("count"), elapsed = document.getElementById("elapsed");
+  var errorBox = document.getElementById("error"), cancelBtn = document.getElementById("cancel");
+  var doneLink = document.getElementById("done-link"), track = document.getElementById("track");
+  var finished = false;
+
+  function stop() { finished = true; cancelBtn.style.display = "none"; fill.classList.remove("indeterminate"); }
+
+  cancelBtn.addEventListener("click", function () {
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "正在取消…";
+    fetch("/task_cancel", { method: "POST" }).catch(function () {
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "取消任务";
+    });
+  });
+
+  setInterval(function () {
+    if (finished) return;
+    fetch("/task_status").then(function (r) { return r.json(); }).then(function (t) {
+      if (t.progress > 0) {
+        fill.style.width = t.progress + "%";
+        pct.textContent = t.progress + "%";
+        track.setAttribute("aria-valuenow", String(t.progress));
+      }
+      stage.textContent = t.stage || "";
+      detail.textContent = t.detail || "";
+      if (t.total) count.textContent = t.done + "/" + t.total + " 份";
+      if (t.elapsed != null) elapsed.textContent = "已用时 " + Math.round(t.elapsed) + " 秒";
+      if (t.status === "done") {
+        stop();
+        pct.textContent = "100%";
+        fill.style.width = "100%";
+        track.setAttribute("aria-valuenow", "100");
+        setTimeout(function () { location.replace(t.redirect); }, 600);
+      } else if (t.status === "error") {
+        stop();
+        stage.textContent = "任务失败";
+        errorBox.hidden = false;
+        errorBox.firstElementChild.textContent = "原因：" + (t.error || "未知错误") + "。可返回重试；反复失败请检查模型配置。";
+      } else if (t.status === "cancelled") {
+        stop();
+        stage.textContent = "任务已取消";
+        doneLink.href = "/";
+        doneLink.textContent = "返回工作台";
+        doneLink.hidden = false;
+      } else if (t.cancel && t.status === "running") {
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = "正在取消…";
+      }
+    }).catch(function () { /* 网络抖动，下次轮询重试 */ });
+  }, 1000);
+})();
+</script>
+{% endblock %}

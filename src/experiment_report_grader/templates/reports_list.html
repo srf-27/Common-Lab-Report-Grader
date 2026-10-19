@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}报告管理 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">工作台</a> / 报告管理</p>
+  <h1>学生报告</h1>
+  <p class="subtitle">共 {{ reports|length }} 份已提取报告。可查看按维度挂载的原文与图片，或打开原始文件核对。</p>
+</div>
+
+{% if reports %}
+<div class="toolbar">
+  <div class="search-field">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <label class="sr-only" for="report-filter">按文件名或学生筛选</label>
+    <input class="input" id="report-filter" type="search" placeholder="按文件名或学生筛选" autocomplete="off">
+  </div>
+  <span class="footnote" id="filter-count" aria-live="polite"></span>
+  <span class="spacer"></span>
+  {% if downloads.get('excel') %}<a href="/download/{{ downloads['excel'] }}" class="btn small filled">下载成绩 Excel</a>
+  {% else %}<span class="btn small filled" aria-disabled="true" title="还没有评分结果可导出">下载成绩 Excel</span>{% endif %}
+  {% if downloads.get('json') %}<a href="/download/{{ downloads['json'] }}" class="btn small bordered">评分明细</a>{% endif %}
+  {% if downloads.get('flagged') %}<a href="/download/{{ downloads['flagged'] }}" class="btn small bordered">被标记人员</a>{% endif %}
+</div>
+
+<div class="group">
+  {% for r in reports %}
+  {% set fn = r.meta.filename %}
+  {% set stu = r.meta.get('student') or {} %}
+  {% set stu_text = (stu.get('姓名','') ~ ' ' ~ stu.get('学号','') ~ ' ' ~ stu.get('班级',''))|trim %}
+  <div class="row" data-search="{{ (fn ~ ' ' ~ stu_text)|lower }}">
+    <div class="row-main">
+      <div class="row-title"><a href="/report/{{ fn }}">{{ fn }}</a></div>
+      <div class="row-sub">{% if stu_text %}{{ stu_text }}{% else %}未识别学生信息{% endif %}</div>
+      <div class="row-meta">
+        <span>{% if r.meta.pages %}{{ r.meta.pages }} 页{% elif r.meta.paragraphs %}{{ r.meta.paragraphs }} 段{% else %}—{% endif %} · {{ r.meta.image_count or 0 }} 图</span>
+        <span>{% if r.meta.is_scanned %}扫描件（OCR）{% else %}文本型{% endif %}</span>
+      </div>
+    </div>
+    <div class="row-trailing">
+      {% if r.approved %}<span class="badge ok">已终审</span>
+      {% elif r.graded %}<span class="badge info">已评分</span>
+      {% else %}<span class="badge neutral">待评分</span>{% endif %}
+      <a href="/report/{{ fn }}" class="btn small bordered">详情</a>
+      {% if r.has_original %}
+      <button type="button" class="btn small plain" data-fid="{{ fn }}" onclick="openReader(this.dataset.fid)">原文</button>
+      {% else %}
+      <span class="btn small plain" aria-disabled="true" title="原始文件已不在工作目录">原文</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="note-box" id="no-match" hidden>
+  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+  <div>没有匹配的报告，换个关键词试试。</div>
+</div>
+
+<div class="btn-row" style="margin-top:var(--space-4)">
+  {% if rubric %}
+  <a href="/grading_select" class="btn filled">开始评分</a>
+  {% else %}
+  <span class="btn filled" aria-disabled="true" title="请先生成评分细则">开始评分</span>
+  <a href="/rubric_review" class="btn bordered">去配置细则</a>
+  {% endif %}
+  <a href="/roster" class="btn bordered">花名册</a>
+</div>
+
+<script>
+(function () {
+  var rows = [].slice.call(document.querySelectorAll(".group .row[data-search]"));
+  var box = document.getElementById("report-filter");
+  var count = document.getElementById("filter-count");
+  var empty = document.getElementById("no-match");
+  function apply() {
+    var q = box.value.trim().toLowerCase(), shown = 0;
+    rows.forEach(function (row) {
+      var hit = !q || row.dataset.search.indexOf(q) >= 0;
+      row.style.display = hit ? "" : "none";
+      if (hit) shown++;
+    });
+    count.textContent = "显示 " + shown + " / " + rows.length;
+    empty.hidden = shown > 0;
+  }
+  box.addEventListener("input", apply);
+  apply();
+})();
+</script>
+
+{% else %}
+<div class="empty">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+  <h2>还没有提取到报告</h2>
+  <p>支持 PDF、DOCX、Markdown 与压缩包批量上传。</p>
+  <a href="/" class="btn filled">去上传报告</a>
+</div>
+{% endif %}
+{% endblock %}

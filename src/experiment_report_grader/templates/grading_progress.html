@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}评分进行中 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">工作台</a> / 评分进行中</p>
+  <h1>评分进行中</h1>
+  <p class="subtitle">逐份执行：注入检测 → 内容安全 → 相似度比对 → 按维度判级。可以离开此页，任务会在后台继续。</p>
+</div>
+
+<div class="group progress-card">
+  <div class="group-body">
+    <div class="progress-head">
+      <h2 id="phase-text">{{ status.get('phase') or '准备中' }}</h2>
+      <span class="progress-count" id="count-text">{{ status.get('done', 0) }} / {{ status.get('total', 0) }}</span>
+    </div>
+    <div class="track" role="progressbar" aria-label="评分进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="track">
+      <i id="fill"></i>
+    </div>
+    <p class="progress-line" id="current-text" aria-live="polite">正在启动评分引擎…</p>
+    <div class="note-box danger" id="error-box" hidden><div></div></div>
+    <div class="btn-row" style="margin-top:var(--space-4)">
+      <button type="button" class="btn bordered" id="cancel-btn"
+              {% if status.get('phase') != 'running' %}disabled{% endif %}>取消评分</button>
+      <a href="/" class="btn plain">返回工作台</a>
+      <a href="/reports_list" class="btn plain">报告管理</a>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var cancelBtn = document.getElementById("cancel-btn");
+  var cancelSent = false;
+  cancelBtn.addEventListener("click", function () {
+    if (cancelSent) return;
+    cancelSent = true;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "正在取消…";
+    fetch("/grading_cancel", { method: "POST" });
+  });
+
+  (function poll() {
+    fetch("/grading_status").then(function (r) { return r.json(); }).then(function (s) {
+      var phase = s.phase || "idle";
+      var done = s.done || 0, total = s.total || 0;
+      var pct = total ? Math.round(done * 100 / total) : (phase === "done" ? 100 : 0);
+      document.getElementById("fill").style.width = pct + "%";
+      document.getElementById("track").setAttribute("aria-valuenow", String(pct));
+      document.getElementById("count-text").textContent = done + " / " + total;
+      var phaseText = document.getElementById("phase-text");
+      var current = document.getElementById("current-text");
+      if (phase === "running") {
+        cancelBtn.disabled = false;
+        phaseText.textContent = s.cancel ? "正在取消" : "评分中";
+        current.textContent = s.cancel ? "取消将在当前报告评分结束后生效…"
+          : (s.current ? "正在评阅：" + s.current : "正在启动评分引擎…");
+      } else if (phase === "done") {
+        phaseText.textContent = "评分完成";
+        current.textContent = "正在打开结果页…";
+        cancelBtn.style.display = "none";
+        setTimeout(function () { location.replace("/grading_done"); }, 600);
+        return;
+      } else if (phase === "cancelled") {
+        phaseText.textContent = "已取消";
+        current.textContent = s.message || "已取消，未评分的报告可重新开始评分";
+        cancelBtn.style.display = "none";
+        return;
+      } else if (phase === "error") {
+        phaseText.textContent = "评分出错";
+        current.textContent = "";
+        var box = document.getElementById("error-box");
+        box.hidden = false;
+        box.firstElementChild.textContent = s.message || "未知错误";
+        cancelBtn.style.display = "none";
+        return;
+      } else {
+        cancelBtn.disabled = true;
+        current.textContent = "尚未开始评分：回到工作台勾选报告后再开始。";
+      }
+      setTimeout(poll, 1800);
+    }).catch(function () { setTimeout(poll, 2500); });
+  })();
+})();
+</script>
+{% endblock %}
