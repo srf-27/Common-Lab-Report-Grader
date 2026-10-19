@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}校准结果 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">工作台</a> / <a href="/rubric_review">评分细则</a> / 校准结果</p>
+  <h1>校准对比</h1>
+  <p class="subtitle">教师等级与 AI 等级逐维度对比；分歧项给出原因与改法，用于打磨等级边界。</p>
+</div>
+
+{% if error %}
+<div class="note-box danger">
+  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+  <div>{{ error }}</div>
+</div>
+<div class="btn-row"><a href="/rubric_review" class="btn filled">返回细则</a></div>
+{% else %}
+
+{% if ai_grading and ai_grading.scores %}
+<section class="group">
+  <div class="group-head">
+    <h2>AI 评分</h2>
+    <span class="note">{{ ai_grading.subtotals.total if ai_grading.subtotals else '—' }} 分</span>
+  </div>
+  <div class="group-body">
+    {% if ai_grading.summary %}<p class="footnote" style="margin-bottom:var(--space-3)">{{ ai_grading.summary }}</p>{% endif %}
+    <div class="table-wrap">
+      <table class="grid">
+        <caption class="sr-only">AI 逐维度评分</caption>
+        <thead><tr><th>维度</th><th>等级</th><th>依据</th></tr></thead>
+        <tbody>
+          {% for name, d in ai_grading.scores.items() %}
+          <tr>
+            <td>{{ name }}</td>
+            <td><span class="level {{ d.level|lower }}">{{ d.level }}</span></td>
+            <td>{{ d.evidence or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% if analysis %}
+<section class="group">
+  <div class="group-head">
+    <h2>分歧与修订建议</h2>
+    <span class="note">{{ (analysis.disagreements or [])|length }} 处分歧</span>
+  </div>
+  <div class="group-body">
+    {% if analysis.agreements %}
+    <p class="footnote" style="margin-bottom:var(--space-3)">一致维度：{{ analysis.agreements|join('、') }}</p>
+    {% endif %}
+    {% for d in analysis.disagreements or [] %}
+    <div class="note-box warn" style="display:block">
+      <strong>{{ d.criterion }}</strong>
+      <p class="footnote" style="margin-top:4px">教师 {{ d.teacher_score }} · AI {{ d.ai_score }}</p>
+      <p class="footnote">原因：{{ d.reason }}</p>
+      <p class="footnote">建议：{{ d.suggested_rubric_adjustment }}</p>
+    </div>
+    {% endfor %}
+    {% if analysis.suggested_rubric_revisions %}
+    <details class="disclosure inset">
+      <summary>修订后的细则（可复制到细则页）</summary>
+      <div class="disclosure-body">
+        <div class="chunk" style="white-space:pre-wrap">{{ analysis.suggested_rubric_revisions }}</div>
+      </div>
+    </details>
+    {% endif %}
+  </div>
+</section>
+{% else %}
+<div class="note-box warn"><div>模型未返回可解析的对比结果，请重试或检查模型配置。</div></div>
+{% endif %}
+
+<div class="btn-row"><a href="/rubric_review" class="btn filled">返回细则</a></div>
+{% endif %}
+{% endblock %}

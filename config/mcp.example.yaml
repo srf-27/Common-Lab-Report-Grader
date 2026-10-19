@@ -1,0 +1,17 @@
+# MCP 插件注册表模板：复制为 config/mcp.yaml 后按需修改（也可在「插件」页添加）
+#
+# servers:
+#   physics-ref:
+#     transport: stdio              # stdio 子进程 | http 端点
+#     command: npx
+#     args: ["-y", "@your/physics-ref-server"]
+#     env:
+#       REF_API_KEY: "xxx"
+#     note: "物理实验学科参考"
+#
+#   lab-http:
+#     transport: http
+#     url: "http://127.0.0.1:8931/mcp"
+#     headers: {}
+#     note: "远程学科参考"
+servers: {}

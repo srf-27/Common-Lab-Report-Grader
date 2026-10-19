@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block title %}插件 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">工作台</a> / 插件</p>
+  <h1>MCP 插件</h1>
+  <p class="subtitle">把学科类 MCP 服务挂到当前课程：评分时读取其中的 reference（资源 / 检索工具 / 学科提示词）作为事实核对材料。插件不可用时评分照常进行，仅在结果页标注。</p>
+</div>
+
+{% if error %}<div class="note-box warn"><div>{{ error }}</div></div>{% endif %}
+
+{% set names = servers.keys()|list %}
+<section class="group">
+  <div class="group-head">
+    <h2>挂载到「{{ current_session.name }}」</h2>
+    <span class="note">{{ names|length }} 个插件可用</span>
+  </div>
+  <div class="group-body">
+    {% if not names %}
+    <div class="note-box">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M11 12h1v5h1"/></svg>
+      <div>还没有登记任何 MCP 插件。先在页面底部「添加插件」填一个（stdio 或 http 均可），再回来勾选挂载。</div>
+    </div>
+    {% else %}
+    <form action="/mcp/mount" method="post">
+      <div class="table-wrap" style="margin-bottom:var(--space-4)">
+        <table class="grid">
+          <caption class="sr-only">可挂载的插件</caption>
+          <thead><tr><th style="width:64px">挂载</th><th>插件</th><th>类型</th><th>说明</th></tr></thead>
+          <tbody>
+            {% for name, cfg in servers.items() %}
+            <tr>
+              <td>
+                <label class="check-row" style="justify-content:center">
+                  <input type="checkbox" name="servers" value="{{ name }}"
+                         {% if name in (mount.servers or []) %}checked{% endif %}
+                         aria-label="挂载 {{ name }}">
+                </label>
+              </td>
+              <td><strong>{{ name }}</strong></td>
+              <td><span class="badge {{ 'info' if cfg.transport == 'http' else 'neutral' }}">{{ cfg.transport or 'stdio' }}</span></td>
+              <td class="muted">{{ cfg.note or '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="form-grid">
+        <div class="field span-all">
+          <label for="mcp-resources">资源过滤（每行一个通配，如 <span class="mono">ref://physics/*</span>）</label>
+          <textarea class="textarea" id="mcp-resources" name="resources" rows="2"
+                    placeholder="留空表示读取全部资源">{{ (mount.resources or [])|join('\n') }}</textarea>
+        </div>
+        <div class="field">
+          <label for="mcp-tool">检索工具名（可选）</label>
+          <input class="input" id="mcp-tool" name="search_tool" value="{{ mount.search_tool or '' }}"
+                 placeholder="如 search_reference，用维度名作为 query">
+        </div>
+        <div class="field">
+          <label for="mcp-prompt">学科提示词名（可选）</label>
+          <input class="input" id="mcp-prompt" name="prompt" value="{{ mount.prompt or '' }}"
+                 placeholder="如 lab_guidance，作为学科指引注入">
+        </div>
+        <div class="field">
+          <label for="mcp-max">参考文本上限（字符）</label>
+          <input class="input" id="mcp-max" name="max_chars" type="number" min="200" max="20000" step="100"
+                 value="{{ mount.max_chars or 4000 }}">
+          <span class="hint">越大越慢，建议 2000–6000</span>
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:var(--space-4)">
+        <button type="submit" class="btn filled">保存挂载</button>
+      </div>
+    </form>
+    {% if mount.servers %}
+    <form action="/mcp/refresh" method="post" class="btn-row" style="margin-top:var(--space-3)">
+      <button type="submit" class="btn bordered">立即拉取一次参考</button>
+      <span class="footnote">已挂载：{{ mount.servers|join('、') }}</span>
+    </form>
+    {% endif %}
+    {% endif %}
+  </div>
+</section>
+
+{% if status %}
+<details class="disclosure" {% if referenced %}open{% endif %}>
+  <summary>最近一次拉取 <span class="note">{{ status|length }} 个插件</span></summary>
+  <div class="disclosure-body">
+    <div class="table-wrap">
+      <table class="grid">
+        <caption class="sr-only">插件可用性</caption>
+        <thead><tr><th>插件</th><th>结果</th><th class="num">条目数</th><th>错误</th></tr></thead>
+        <tbody>
+          {% for s in status %}
+          <tr>
+            <td><strong>{{ s.name }}</strong></td>
+            <td>{% if s.ok %}<span class="badge ok">可用</span>{% else %}<span class="badge danger">不可用</span>{% endif %}</td>
+            <td class="num">{{ s.count }}</td>
+            <td class="muted">{{ s.error or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if referenced %}
+    <details class="disclosure inset" style="margin-top:var(--space-3)">
+      <summary>参考文本节选（评分时注入）</summary>
+      <div class="disclosure-body"><div class="chunk" data-md>{{ referenced }}</div></div>
+    </details>
+    {% else %}
+    <p class="footnote" style="margin-top:var(--space-3)">本次没有取到参考文本：检查资源过滤条件、检索工具名，或插件是否已启动。</p>
+    {% endif %}
+  </div>
+</details>
+{% endif %}
+
+<section class="group">
+  <div class="group-head"><h2>已登记插件</h2><span class="note">写入 config/mcp.yaml</span></div>
+  <div class="group-body">
+    {% if servers %}
+    <div class="table-wrap">
+      <table class="grid">
+        <caption class="sr-only">已登记插件</caption>
+        <thead><tr><th>名称</th><th>连接</th><th>测试</th><th>操作</th></tr></thead>
+        <tbody>
+          {% for name, cfg in servers.items() %}
+          <tr>
+            <td><strong>{{ name }}</strong><div class="footnote">{{ cfg.note or '' }}</div></td>
+            <td class="mono footnote">
+              {% if cfg.transport == 'http' %}{{ cfg.url }}{% else %}{{ cfg.command }} {{ (cfg.args or [])|join(' ') }}{% endif %}
+            </td>
+            <td>
+              <button type="button" class="btn small bordered" data-test="{{ name }}">测试连接</button>
+              <div class="footnote" data-out="{{ name }}" role="status" aria-live="polite"></div>
+            </td>
+            <td>
+              <form method="post" action="/mcp/remove" class="inline">
+                <input type="hidden" name="name" value="{{ name }}">
+                <button type="submit" class="btn small destructive">删除</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="footnote">尚未登记插件。</p>
+    {% endif %}
+  </div>
+</section>
+
+<details class="disclosure" id="add-server" {% if not servers %}open{% endif %}>
+  <summary>添加插件 <span class="note">stdio 子进程或 HTTP 端点</span></summary>
+  <div class="disclosure-body">
+    <form action="/mcp/add" method="post">
+      <div class="form-grid">
+        <div class="field">
+          <label for="mcp-name">名称</label>
+          <input class="input" id="mcp-name" name="name" placeholder="physics-ref" required
+                 pattern="[A-Za-z0-9_.\-]+" title="字母、数字、- _ .">
+        </div>
+        <div class="field">
+          <label for="mcp-transport">传输方式</label>
+          <select class="select" id="mcp-transport" name="transport">
+            <option value="stdio">stdio（本地子进程）</option>
+            <option value="http">http（远程端点）</option>
+          </select>
+        </div>
+        <div class="field" data-for="stdio">
+          <label for="mcp-command">命令</label>
+          <input class="input" id="mcp-command" name="command" placeholder="npx">
+        </div>
+        <div class="field" data-for="stdio">
+          <label for="mcp-args">参数（空格分隔）</label>
+          <input class="input" id="mcp-args" name="args" placeholder="-y @scope/server-name">
+        </div>
+        <div class="field" data-for="stdio">
+          <label for="mcp-env">环境变量（每行 KEY=VALUE）</label>
+          <textarea class="textarea" id="mcp-env" name="env" rows="2" placeholder="API_KEY=xxx"></textarea>
+        </div>
+        <div class="field" data-for="http" hidden>
+          <label for="mcp-url">URL</label>
+          <input class="input" id="mcp-url" name="url" placeholder="http://127.0.0.1:8931/mcp">
+        </div>
+        <div class="field">
+          <label for="mcp-note">说明</label>
+          <input class="input" id="mcp-note" name="note" placeholder="物理实验学科参考">
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:var(--space-4)">
+        <button type="submit" class="btn filled">保存插件</button>
+      </div>
+    </form>
+  </div>
+</details>
+
+<script>
+document.getElementById("mcp-transport").addEventListener("change", function () {
+  var http = this.value === "http";
+  document.querySelectorAll('[data-for="stdio"]').forEach(function (el) { el.hidden = http; });
+  document.querySelectorAll('[data-for="http"]').forEach(function (el) { el.hidden = !http; });
+});
+document.querySelectorAll("[data-test]").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var name = btn.dataset.test;
+    var out = document.querySelector('[data-out="' + name + '"]');
+    out.textContent = "连接中…";
+    fetch("/mcp/test/" + encodeURIComponent(name))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.error) { out.textContent = "失败：" + d.error; return; }
+        out.textContent = "工具 " + (d.tools || []).length + " · 资源 " + (d.resources || []).length +
+          " · 提示词 " + (d.prompts || []).length +
+          ((d.errors && d.errors.length) ? " · 警告：" + d.errors.join("; ") : "");
+      })
+      .catch(function (e) { out.textContent = "失败：" + e; });
+  });
+});
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll(".chunk[data-md]").forEach(function (el) {
+    el.innerHTML = renderReaderBlock(el.textContent);
+    renderMathIn(el);
+  });
+});
+</script>
+{% endblock %}

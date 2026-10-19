@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}界面尚未构建{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>界面尚未构建</h1>
+  <p class="subtitle">新版界面由 React + HeroUI 构建。请先构建前端产物，再回到本页。</p>
+</div>
+<div class="group">
+  <div class="group-body">
+    <pre class="chunk" style="white-space:pre-wrap">cd frontend
+npm install --registry=https://registry.npmmirror.com
+npm run build</pre>
+    <p class="footnote" style="margin-top:12px">构建产物写入 <span class="mono">src/experiment_report_grader/static/ui/</span>，刷新即可访问；未构建时可先用经典工作台。</p>
+  </div>
+</div>
+<a class="btn filled" href="/classic">进入经典工作台</a>
+{% endblock %}

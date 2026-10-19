@@ -1,6 +1,7 @@
 flask>=3.0
 pyyaml>=6.0
 pymupdf>=1.24
+pymupdf4llm>=1.28
 paddleocr>=2.7
 paddlepaddle>=2.5
 python-docx>=1.1
@@ -8,6 +9,7 @@ rarfile>=4.1
 py7zr>=0.21
 chromadb>=0.5
 openai>=1.30
+requests>=2.31
 numpy>=1.24
 openpyxl>=3.1
 Pillow>=10.0

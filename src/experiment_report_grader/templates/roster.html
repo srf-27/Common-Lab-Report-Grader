@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}花名册 — 智能评阅{% endblock %}
+{% block content %}
+<div class="page-head">
+  <p class="eyebrow"><a href="/">工作台</a> / 花名册</p>
+  <h1>班级花名册</h1>
+  <p class="subtitle">上传后，表头决定学生信息的提取与导出列，并按学号（无则姓名）与报告匹配。人数核对只在本页提示。</p>
+</div>
+
+{% if mostly_unmatched %}
+<div class="note-box warn">
+  <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5"/><path d="M12 17h.01"/></svg>
+  <div>
+    多数报告没有匹配到名册学生（可疑 {{ suspicious|length }} / 已收 {{ report_count }}），因此缺交名单会显示全部名册。
+    通常是报告里没提取到学号或姓名：到「报告管理 → 详情」逐份补填，或重新上传带姓名/学号的文件后再提取。
+  </div>
+</div>
+{% endif %}
+
+<div class="metrics">
+  <div class="metric"><span class="k">名册人数</span><span class="v">{{ roster.rows|length if roster else 0 }}</span></div>
+  <div class="metric"><span class="k">已收报告</span><span class="v">{{ report_count }}</span></div>
+  <div class="metric"><span class="k">缺交</span><span class="v">{{ missing|length }}</span></div>
+  <div class="metric"><span class="k">可疑</span><span class="v">{{ suspicious|length }}</span></div>
+</div>
+
+<details class="disclosure" {% if not roster %}open{% endif %}>
+  <summary>{{ '替换花名册' if roster else '上传花名册' }} <span class="note">.xlsx / .csv，首行为表头</span></summary>
+  <div class="disclosure-body">
+    <form action="/roster/upload" method="post" enctype="multipart/form-data" style="max-width:460px">
+      <label class="file-drop">
+        <input type="file" name="roster_file" accept=".xlsx,.csv" required aria-label="选择花名册文件">
+        <span class="drop-zone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+          点击选择花名册
+          <span class="hint">.xlsx / .csv</span>
+        </span>
+      </label>
+      <div class="btn-row" style="margin-top:var(--space-3)">
+        <button type="submit" class="btn filled">上传</button>
+      </div>
+    </form>
+    {% if not roster %}<p class="footnote" style="margin-top:var(--space-3)">未上传花名册时，系统按默认四列（班级 / 学院 / 学号 / 姓名）提取与导出。</p>{% endif %}
+  </div>
+</details>
+
+{% if roster %}
+<details class="disclosure">
+  <summary>编辑名册 <span class="note">{{ roster.rows|length }} 行 · 表头可改，改表头即改导出列</span></summary>
+  <div class="disclosure-body">
+    <div class="btn-row" style="margin-bottom:var(--space-3)">
+      <button type="button" class="btn small bordered" onclick="addRow()">加一行</button>
+      <span class="footnote">表头即列名，点 × 删除该列；列多时可左右滑动，操作列固定在左侧</span>
+    </div>
+    <form action="/roster/save" method="post" id="roster-form">
+      <input type="hidden" name="data" id="roster-data">
+      <div class="table-wrap">
+        <table class="grid roster-edit" id="roster-table">
+          <caption class="sr-only">花名册编辑表</caption>
+          <thead><tr id="roster-head"><th class="op-col">操作</th></tr></thead>
+          <tbody id="roster-body"></tbody>
+        </table>
+      </div>
+      <div class="btn-row" style="margin-top:var(--space-4)">
+        <button type="submit" class="btn filled">保存花名册</button>
+      </div>
+    </form>
+  </div>
+</details>
+<script>
+var rosterData = {{ roster|tojson }};
+var headRow = document.getElementById("roster-head");
+var body = document.getElementById("roster-body");
+var COMPACT = "min-height:36px;padding:6px 8px;font-size:var(--type-footnote)";
+
+function cellInput(value, oninput, label) {
+  var el = document.createElement("input");
+  el.type = "text";
+  el.className = "input";
+  el.style.cssText = COMPACT;
+  el.value = value || "";
+  el.setAttribute("aria-label", label || "单元格");
+  el.addEventListener("input", oninput);
+  return el;
+}
+function renderHead() {
+  headRow.querySelectorAll("th:not(.op-col)").forEach(function (th) { th.remove(); });
+  rosterData.headers.forEach(function (h, ci) {
+    var th = document.createElement("th");
+    var wrap = document.createElement("div");
+    wrap.className = "col-head";
+    wrap.appendChild(cellInput(h, function () {
+      var nv = this.value.trim() || ("列" + (ci + 1));
+      rosterData.rows.forEach(function (row) {
+        if (h in row) { row[nv] = row[h]; delete row[h]; }
+      });
+      rosterData.headers[ci] = nv;
+      h = nv;
+    }, "列名：" + h));
+
+    var del = document.createElement("button");
+    del.type = "button";
+    del.className = "col-del";
+    del.textContent = "×";
+    del.title = "删除列「" + h + "」";
+    del.setAttribute("aria-label", "删除列「" + h + "」");
+    del.onclick = function () {
+      if (!confirm("删除列「" + h + "」？保存后生效。")) return;
+      var key = rosterData.headers[ci];
+      rosterData.headers.splice(ci, 1);
+      rosterData.rows.forEach(function (row) { delete row[key]; });
+      renderAll();
+    };
+    wrap.appendChild(del);
+    th.appendChild(wrap);
+    headRow.appendChild(th);
+  });
+}
+function renderRow(row, ri) {
+  var tr = document.createElement("tr");
+  var td = document.createElement("td");
+  var del = document.createElement("button");
+  del.type = "button";
+  del.className = "btn small destructive row-del";
+  del.textContent = "删除";
+  del.setAttribute("aria-label", "删除第 " + (ri + 1) + " 行");
+  del.onclick = function () { rosterData.rows.splice(ri, 1); renderAll(); };
+  td.appendChild(del);
+  tr.appendChild(td);
+  rosterData.headers.forEach(function (h) {
+    var cell = document.createElement("td");
+    cell.appendChild(cellInput(row[h], function () { row[h] = this.value; }, h));
+    tr.appendChild(cell);
+  });
+  return tr;
+}
+function addRow() {
+  var row = {};
+  rosterData.headers.forEach(function (h) { row[h] = ""; });
+  rosterData.rows.push(row);
+  var tr = renderRow(row, rosterData.rows.length - 1);
+  body.appendChild(tr);
+  tr.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+function renderAll() {
+  renderHead();
+  body.innerHTML = "";
+  rosterData.rows.forEach(function (row, ri) { body.appendChild(renderRow(row, ri)); });
+}
+document.getElementById("roster-form").addEventListener("submit", function () {
+  document.getElementById("roster-data").value = JSON.stringify(rosterData);
+});
+renderAll();
+</script>
+{% endif %}
+
+{% if suspicious %}
+<details class="disclosure">
+  <summary>可疑人员 <span class="note">{{ suspicious|length }} 份 · 学号不在名册或姓名不一致</span></summary>
+  <div class="disclosure-body">
+    <div class="table-wrap">
+      <table class="grid">
+        <caption class="sr-only">可疑人员列表</caption>
+        <thead><tr><th>报告</th><th>原因</th><th>操作</th></tr></thead>
+        <tbody>
+          {% for s in suspicious %}
+          <tr>
+            <td><a href="/report/{{ s.report_id }}">{{ s.report_id }}</a></td>
+            <td>{{ s.reason }}</td>
+            <td><a href="/report/{{ s.report_id }}" class="btn small bordered">修正信息</a></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</details>
+{% endif %}
+
+{% if missing %}
+<details class="disclosure">
+  <summary>缺交名单 <span class="note">{{ missing|length }} 人</span></summary>
+  <div class="disclosure-body">
+    <div class="table-wrap">
+      <table class="grid">
+        <caption class="sr-only">缺交名单</caption>
+        <thead><tr>{% for h in roster.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for row in missing %}
+          <tr>{% for h in roster.headers %}<td>{{ row.get(h, '') }}</td>{% endfor %}</tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</details>
+{% endif %}
+{% endblock %}
