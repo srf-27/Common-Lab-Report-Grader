@@ -67,3 +67,5 @@ htmlcov/
 
 # 临时向量库（脚本探测时生成）
 src/experiment_report_grader/embedding/db/
+# E2E 点击测试产物
+tests/e2e/_artifacts/
