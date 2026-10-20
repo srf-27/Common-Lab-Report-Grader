@@ -115,7 +115,9 @@ export default function ReportDetail({ filename }) {
                       <span className="t-caption c-secondary">
                         {block.chunks?.length || 0} 段 · {block.images?.length || 0} 图
                       </span>
-                      {block.score?.level ? (
+                      {block.score?.external ? (
+                        <Badge tone="ok">成绩单 {Math.round(Number(block.score.score))}</Badge>
+                      ) : block.score?.level ? (
                         <LevelBadge
                           level={block.score.level}
                           title={`${block.score.level} ${LEVEL_LABEL[block.score.level] || ""}`}
@@ -162,8 +164,11 @@ export default function ReportDetail({ filename }) {
                     <div style={{ marginTop: 10 }}>
                       <div className="row-wrap" style={{ gap: 6, marginBottom: 6 }}>
                         <Badge tone={block.score.teacher_adjusted ? "warn" : "ok"}>
-                          {block.score.level} · {LEVEL_LABEL[block.score.level] || ""}
+                          {block.score.external
+                            ? `成绩单 ${Math.round(Number(block.score.score))}`
+                            : `${block.score.level} · ${LEVEL_LABEL[block.score.level] || ""}`}
                         </Badge>
+                        {block.score.external ? <Badge outline>已计入总分</Badge> : null}
                         {block.score.ai_level ? <Badge outline>AI 原判 {block.score.ai_level}</Badge> : null}
                         {block.score.teacher_adjusted ? <Badge tone="warn">教师已改</Badge> : null}
                       </div>
@@ -213,7 +218,11 @@ export default function ReportDetail({ filename }) {
                     {Object.entries(result.grading.scores || {}).map(([name, score]) => (
                       <div key={name} className="dim-row">
                         <span className="t-subhead truncate">{name}</span>
-                        <LevelBadge level={score.level} />
+                        {score.external ? (
+                          <Badge tone="ok">成绩单 {Math.round(Number(score.score))}</Badge>
+                        ) : (
+                          <LevelBadge level={score.level} />
+                        )}
                       </div>
                     ))}
                   </div>

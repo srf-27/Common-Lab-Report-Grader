@@ -115,3 +115,20 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
     print("test_grader ok")
+
+
+class _Silent:
+    def chat(self, messages, temperature=0):
+        return "{}"
+
+
+def test_assign_falls_back_to_keywords():
+    criteria = [{"name": "数据处理与计算分析", "weight": 50, "mechanical": False,
+                 "doc_ref": "步骤 3", "levels": {k: k for k in "ABCDE"}, "rules": None},
+                {"name": "实验目的、原理及反应体系论述", "weight": 50, "mechanical": False,
+                 "doc_ref": "引言", "levels": {k: k for k in "ABCDE"}, "rules": None}]
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        grader = Grader({"criteria": criteria}, llm_client=_Silent(), config={"grading": {}},
+                        output_dir=str(Path(tmp) / "grading"), kb_session_dir=tmp)
+        mapping = grader.assign_items([{"id": "p0", "text": "数据处理与计算：逐差法求平均值"}])
+        assert mapping["p0"]["criterion"] == "数据处理与计算分析"

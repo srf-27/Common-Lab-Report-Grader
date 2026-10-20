@@ -61,8 +61,14 @@ class FakeLLM:
 
     @staticmethod
     def _names(text):
-        m = re.search(r"评分维度：(.+)", text)
-        return [n.strip() for n in m.group(1).split("、") if n.strip()] if m else []
+        m = re.search(r"评分维度[^\n]*\n(.+?)\n规则", text, re.S)
+        if not m:
+            return []
+        block = m.group(1)
+        numbered = re.findall(r"^\s*\d+\.\s*(.+?)\s*$", block, re.M)
+        if numbered:
+            return numbered
+        return [n.strip() for n in re.split(r"[、，]", block) if n.strip()]
 
     def _assignments(self, text):
         payload = text.split("待归类内容（JSON）：", 1)[-1]

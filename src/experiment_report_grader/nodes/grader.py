@@ -10,7 +10,7 @@ from ..utils.content_safety import check_content_safety
 from ..utils.injection_detector import detect_injection
 from ..utils.privacy import anonymize_text
 from . import verifier
-from .rubric_io import LEVEL_POINTS, LEVELS, compute_subtotals
+from .rubric_io import LEVEL_POINTS, LEVELS, compute_subtotals, match_criterion
 
 GRADING_SYSTEM = """你是实验报告评阅专家。只按下面给出的评分维度与等级描述判级，不得新增维度。
 
@@ -314,7 +314,8 @@ class Grader:
     def _verifier(self):
         """机械判决项的裁判代码：首次使用时由 LLM 生成，并随 rubric 保存供复核。"""
         if self.verifier_code is None:
-            mechanical = [c for c in self.rubric.get("criteria", []) if c.get("mechanical")]
+            mechanical = [c for c in self.rubric.get("criteria", [])
+                          if c.get("mechanical") and not c.get("excluded")]
             self.verifier_code = self.rubric.get("verifier_code") or ""
             if mechanical and not self.verifier_code:
                 try:
@@ -327,7 +328,8 @@ class Grader:
 
     def _verify_mechanical(self, text):
         scores, fallback = {}, []
-        mechanical = [c for c in self.rubric.get("criteria", []) if c.get("mechanical")]
+        mechanical = [c for c in self.rubric.get("criteria", [])
+                      if c.get("mechanical") and not c.get("excluded")]
         if not mechanical:
             return scores, fallback
         results = {}
@@ -363,13 +365,15 @@ class Grader:
         items = [{"id": e["id"], "text": (e.get("text") or "")[:800]} for e in entries]
         shots = self._exemplar_shots(shots_query or " ".join(i["text"] for i in items),
                                      n_cases=1, max_chars=600)
+        listing = "\n".join(f"{index + 1}. {name}" for index, name in enumerate(names))
         prompt = (
-            "把下面每一条内容归入最相关的评分维度。评分维度：" + "、".join(names)
+            "把下面每一条内容归入最相关的评分维度。评分维度（criterion 必须原样复制下面的名称，"
+            "不要改写、缩写或合并；也可以直接填序号）：\n" + listing
             + "\n规则：每条只能归入一个最相关维度。表格、数据记录、公式推导、计算过程、实验步骤都是正文，"
               "必须归入对应维度；只有不含实质内容的封面/页眉元信息（实验名称、姓名、学号、班级、日期）才填 null。"
               "拿不准时归入最相关维度，禁止因为内容是表格或公式而填 null。"
               "\n逐条快速判断即可：不要复述条目内容，不要写分析过程、理由或解释，"
-              "直接在 JSON 里给出每条的唯一维度名。"
+              "直接在 JSON 里给出每条的唯一维度名。每一项 id 都必须出现一次。"
               "\n只输出 JSON：{\"assignments\": [{\"id\": \"...\", \"criterion\": \"...\"}]}"
             + (f"\n参考范例（已终审，仅供对齐维度粒度）：\n{shots}" if shots else "")
             + "\n待归类内容（JSON）：" + json.dumps(items, ensure_ascii=False)
@@ -378,9 +382,37 @@ class Grader:
             data = _parse_json(self.llm.chat([{"role": "user", "content": prompt}], temperature=0.1))
         except Exception:
             return {}
-        valid = set(names)
-        return {a.get("id"): {"criterion": a.get("criterion"), "reason": a.get("reason", "")}
-                for a in data.get("assignments", []) if a.get("criterion") in valid}
+        result = {}
+        for assignment in data.get("assignments", []):
+            criterion = assignment.get("criterion")
+            if isinstance(criterion, (int, float)) or (
+                    isinstance(criterion, str) and criterion.strip().isdigit()):
+                index = int(criterion) - 1
+                matched = names[index] if 0 <= index < len(names) else None
+            else:
+                matched = match_criterion(criterion, names)
+            if assignment.get("id") and matched:
+                result[assignment["id"]] = {"criterion": matched,
+                                            "reason": assignment.get("reason", "")}
+        if not result:
+            result = self._assign_by_keywords(items, names)
+        return result
+
+    @staticmethod
+    def _assign_by_keywords(items, names):
+        """模型没给出可用归类时的兜底：按维度名的字符二元组重合度挂载。"""
+        grams = {name: {name[i:i + 2] for i in range(len(name) - 1)} for name in names}
+        result = {}
+        for item in items:
+            text = item.get("text") or ""
+            best, score = None, 0
+            for name in names:
+                hit = sum(1 for gram in grams[name] if gram in text)
+                if hit > score:
+                    best, score = name, hit
+            if best and score >= 2:
+                result[item["id"]] = {"criterion": best, "reason": "关键词兜底"}
+        return result
 
     # ---------- 单份评分 ----------
     def grade_single(self, report_id, text, image_descriptions=None, references=""):
@@ -402,7 +434,15 @@ class Grader:
         similarity_warnings = self._check_similarity(report_id, text)
         self._remember_report(report_id, text)
         scores, fallback = self._verify_mechanical(text)
-        semantic = [c for c in self.rubric.get("criteria", []) if c["name"] not in scores] + fallback
+        semantic = [c for c in self.rubric.get("criteria", [])
+                    if c["name"] not in scores and not c.get("excluded")] + fallback
+        if not semantic:
+            # 所有维度都由机械判决或成绩单提供，不再调用模型
+            grading = {"scores": dict(scores), "summary": "全部维度已由程序或成绩单给出",
+                       "flags": [], "subtotals": compute_subtotals(scores, self.rubric)}
+            return self._finish({"report_id": report_id, "status": "graded", "grading": grading,
+                                 "graded_at": time.time(), "similarity_warnings": similarity_warnings,
+                                 "safety_warnings": safety.get("warned", [])}, True)
         # 系统消息与维度块在同一门课内完全一致：稳定前缀越长，供应商的前缀缓存命中越多
         user_prompt = GRADING_USER.format(
             criteria_block=self._criteria_block(semantic),
@@ -439,7 +479,7 @@ class Grader:
         names = [c["name"] for c in self.rubric.get("criteria", [])]
         normalized = {name: raw_scores[name] for name in names if name in raw_scores}
         for name, entry in raw_scores.items():
-            match = next((v for v in names if v not in normalized and (v in name or name in v)), None)
+            match = match_criterion(name, [v for v in names if v not in normalized])
             if match:
                 normalized[match] = entry
         for name, entry in mechanical.items():
@@ -505,9 +545,15 @@ class Grader:
                         subtotals.get("total", "")]
                 scores = r["grading"].get("scores", {})
                 for name, weight in dims:
-                    level = (scores.get(name) or {}).get("level", "")
-                    row.append(f"{level} {round(LEVEL_POINTS[level] * weight / 100.0, 1):g}/{weight:g}"
-                               if level in LEVEL_POINTS else "")
+                    entry = scores.get(name) or {}
+                    level = entry.get("level")
+                    if level in LEVEL_POINTS:
+                        row.append(f"{level} {round(LEVEL_POINTS[level] * weight / 100.0, 1):g}/{weight:g}")
+                    elif entry.get("score") is not None:
+                        score = float(entry["score"])
+                        row.append(f"{score:g} {round(score * weight / 100.0, 1):g}/{weight:g}")
+                    else:
+                        row.append("")
             else:
                 row += ["", "", "", "N/A"] + [""] * len(dim_cols)
             ws.append(row)

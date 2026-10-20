@@ -45,7 +45,7 @@ export default function Reports() {
     mounted.current = true;
     getJSON("/task_status")
       .then((next) => {
-        if (next?.status === "running") {
+        if (next?.kind === "reports" && next.status === "running") {
           setTask(next);
           setPolling(true);
         }
@@ -60,6 +60,7 @@ export default function Reports() {
     try {
       const next = await getJSON("/task_status");
       if (!mounted.current) return;
+      if (next?.kind !== "reports") return;
       setTask(next);
       if (next.status !== "running") {
         setPolling(false);
@@ -114,7 +115,7 @@ export default function Reports() {
       await postForm("/upload_reports", { report_files: files });
       await postForm("/process_reports", {});
       const next = await getJSON("/task_status");
-      if (next?.status !== "running") {
+      if (next?.kind !== "reports" || next.status !== "running") {
         toast("没能开始提取，请重试", "danger");
         return;
       }
@@ -208,8 +209,9 @@ export default function Reports() {
         <Dropzone
           accept=".pdf,.docx,.doc,.md,.zip,.rar,.7z"
           multiple
-          title={files.length ? `已选 ${files.length} 个文件` : "选择报告文件"}
-          hint={files.length ? files.map((item) => item.name).join("、") : "可多选，也可直接丢整个压缩包"}
+          selected={files}
+          title="拖拽报告到这里"
+          hint="支持 PDF / DOCX / DOC / MD / ZIP；可多选，也可整包拖入"
           onFiles={setFiles}
           disabled={polling}
         />
@@ -334,9 +336,34 @@ export default function Reports() {
             ["excel", "成绩 Excel", "所有已评分报告与逐维度等级"],
             ["json", "评分 JSON", "完整判级数据，含证据与理由"],
             ["flagged", "被标记人员", "学号不在名册或姓名不一致的学生"],
-          ].map(([key, label, sub]) =>
-            data.downloads[key] ? (
-              <a className="list-row" key={key} href={`/download/${data.downloads[key]}`}>
+          ].map(([key, label, sub]) => {
+            const href = data.downloads[key];
+            if (!href) {
+              return (
+                <div
+                  className="list-row"
+                  key={key}
+                  data-disabled="true"
+                  title="当前没有可导出的内容"
+                  style={{ opacity: 0.5, cursor: "not-allowed" }}
+                >
+                  <span className="row-icon">
+                    <Icon name="download" size={16} />
+                  </span>
+                  <span className="row-main">
+                    <span className="row-title" style={{ display: "block" }}>
+                      {label}
+                    </span>
+                    <span className="row-sub" style={{ display: "block" }}>
+                      {sub}
+                    </span>
+                  </span>
+                  <Badge>暂无</Badge>
+                </div>
+              );
+            }
+            return (
+              <a className="list-row" key={key} href={`/download/${href}`}>
                 <span className="row-icon">
                   <Icon name="download" size={16} />
                 </span>
@@ -350,8 +377,8 @@ export default function Reports() {
                 </span>
                 <Icon name="chevronRight" size={15} className="row-chevron" />
               </a>
-            ) : null
-          )}
+            );
+          })}
         </Group>
       ) : null}
 

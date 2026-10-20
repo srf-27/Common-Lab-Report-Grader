@@ -1,5 +1,6 @@
 """Web 路由层：会话 → 细则 → 报告 → 评分 → 终审 → 导出，只做编排，逻辑落在 nodes/utils/web。"""
 
+import csv
 import hashlib
 import io
 import json
@@ -15,7 +16,7 @@ from flask import (Flask, jsonify, redirect, render_template, request, send_file
 from .factory import llm
 from .mcp import client as mcp_client
 from .mcp import store as mcp_store
-from .nodes import rubric_io
+from .nodes import agreement, external_scores, rubric_io
 from .nodes.grader import Grader, _coerce_rubric
 from .nodes.report_extractor import ReportExtractor
 from .nodes.rubric_generator import RubricGenerator
@@ -214,6 +215,8 @@ def _session_stage():
     running = (state.get("grading_status") or {}).get("phase") == "running"
     if not results or stale:
         label = STAGES[1][1] + ("（评分结果已过期，请重新评分）" if stale else "")
+        if not stale and state.get("rubric_json") and not _rubric_confirmed():
+            label += "（待样本确认）"
         return STAGES[2] if running else ("rubric", label)
     graded = [r for r in results if r.get("status") == "graded"]
     total = len([r for r in state["extracted_reports"] if r.get("status") == "ok"])
@@ -271,6 +274,7 @@ def _bootstrap_payload():
         "stage": {"key": stage_key, "label": stage_label},
         "rubric": {
             "count": len((state.get("rubric_json") or {}).get("criteria") or []),
+            "confirmed": _rubric_confirmed(),
             "hasUpload": any(os.path.splitext(n)[1].lower() in (".docx", ".pdf", ".txt")
                              and not n.startswith("calibration_") for n in names),
         },
@@ -320,10 +324,21 @@ def upload_criteria():
         return jsonify({"error": "未收到文件"}), 400
     if _busy():
         return jsonify({"error": "有任务正在进行，请稍候或先取消"}), 409
-    filepath = os.path.join(session_sub("uploads"), sanitize_filename(f.filename))
+    name = sanitize_filename(f.filename)
+    filepath = os.path.join(session_sub("uploads"), "criteria_" + name)
     f.save(filepath)
     state["criteria_upload"] = filepath
-    return jsonify({"ok": True, "filename": os.path.basename(filepath)})
+
+    experiment = request.files.get("experiment_file")
+    experiment_name = ""
+    if experiment and experiment.filename:
+        experiment_name = sanitize_filename(experiment.filename)
+        experiment_path = os.path.join(session_sub("uploads"), "experiment_" + experiment_name)
+        experiment.save(experiment_path)
+        state["criteria_experiment"] = experiment_path
+    else:
+        state["criteria_experiment"] = None
+    return jsonify({"ok": True, "filename": name, "experiment": experiment_name})
 
 
 @app.route("/process_criteria", methods=["POST"])
@@ -349,20 +364,35 @@ def process_criteria():
             if not doc_text.strip():
                 task_finish("error", "评分标准文档没有可读文本（可能是纯扫描件，请先 OCR）")
                 return
+            experiment_text = ""
+            experiment_path = state.get("criteria_experiment")
+            if experiment_path and os.path.exists(experiment_path):
+                task_update(progress=18, stage="读取实验流程文本")
+                experiment_text = _read_doc_text(experiment_path)
             task_update(progress=25, stage="生成结构化评分细则",
                         detail="通常需要 1-3 分钟；取消将在当前步骤结束后生效")
             gen = RubricGenerator(llm_client=llm(state["config"]),
                                   output_dir=session_sub("rubrics"))
-            rubric_json = gen.generate_structured(doc_text)
+            if experiment_text.strip():
+                rubric_json = gen.generate_structured_pair(doc_text, experiment_text)
+            else:
+                rubric_json = gen.generate_structured(doc_text)
             if task_cancelled():
                 task_finish("cancelled")
                 return
             warnings = rubric_json.pop("warnings", [])
             task_update(progress=85, stage="保存评分细则")
             state["criteria_doc"] = doc_text
+            state["experiment_doc"] = experiment_text
             state["rubric_json"] = rubric_json
             state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
-            _save_rubric(rubric_json, doc_text)
+            _save_rubric(rubric_json, doc_text, experiment_text)
+            if os.path.exists(_pilot_path()):
+                pilot = _load_pilot()
+                for entry in pilot["reports"]:
+                    entry["ai"] = {}
+                    entry["status"] = "pending"
+                _save_pilot(pilot)
             state["rubric_warnings"] = warnings
             task_update(progress=100, stage="完成",
                         detail=f"共 {len(rubric_json['criteria'])} 个维度"
@@ -375,7 +405,7 @@ def process_criteria():
     return redirect(url_for("task_page"))
 
 
-def _save_rubric(rubric_json, doc_text=None):
+def _save_rubric(rubric_json, doc_text=None, experiment_text=None):
     path = os.path.join(session_sub("rubrics"), "rubric_current.json")
     rubric_io.save_rubric_json(rubric_json, path)
     with open(os.path.join(session_dir(), "rubrics", "rubric_latest.md"), "w", encoding="utf-8") as f:
@@ -383,6 +413,305 @@ def _save_rubric(rubric_json, doc_text=None):
     if doc_text is not None:
         with open(os.path.join(session_dir(), "rubrics", "criteria_doc.txt"), "w", encoding="utf-8") as f:
             f.write(doc_text)
+    if experiment_text is not None:
+        experiment_path = os.path.join(session_dir(), "rubrics", "experiment_doc.txt")
+        if experiment_text.strip():
+            with open(experiment_path, "w", encoding="utf-8") as f:
+                f.write(experiment_text)
+        elif os.path.exists(experiment_path):
+            os.remove(experiment_path)
+
+
+def _apply_external():
+    """把成绩单合并进当前结果（幂等），返回写入条数。"""
+    grader = state.get("grader")
+    rubric = state.get("rubric_json")
+    external = state.get("external") or {}
+    if not grader or not rubric or not external:
+        return 0
+    students = {r["meta"]["filename"]: (r["meta"].get("student") or {})
+                for r in state["extracted_reports"]}
+    return external_scores.apply_to_results(grader.results, rubric, external, students.get)
+
+
+def _read_sheet(storage):
+    ext = os.path.splitext(storage.filename)[1].lower()
+    if ext in (".xlsx", ".xls"):
+        import openpyxl
+        workbook = openpyxl.load_workbook(io.BytesIO(storage.read()), read_only=True, data_only=True)
+        rows = [list(row) for row in workbook.active.iter_rows(values_only=True)]
+        workbook.close()
+        return rows
+    if ext == ".csv":
+        text = storage.read().decode("utf-8-sig", errors="replace")
+        return [row for row in csv.reader(io.StringIO(text))]
+    raise ValueError("成绩单仅支持 .xlsx / .csv")
+
+
+def _score_value(cell):
+    if cell is None:
+        return None
+    text = str(cell).strip().upper()
+    if text in rubric_io.LEVEL_POINTS:
+        return rubric_io.LEVEL_POINTS[text]
+    try:
+        value = float(text.replace("分", "").strip())
+    except ValueError:
+        return None
+    return value if 0 <= value <= 100 else None
+
+
+@app.route("/rubric_external_upload", methods=["POST"])
+def rubric_external_upload():
+    upload = request.files.get("external_file")
+    rubric = state.get("rubric_json")
+    if not upload:
+        return jsonify({"error": "未收到成绩单"}), 400
+    if not rubric:
+        return jsonify({"error": "请先生成评分细则"}), 400
+    excluded = [c["name"] for c in rubric.get("criteria", []) if c.get("excluded")]
+    if not excluded:
+        return jsonify({"error": "当前没有停用的维度，无需上传成绩单"}), 400
+    try:
+        grid = _read_sheet(upload)
+    except (ValueError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not grid:
+        return jsonify({"error": "成绩单为空"}), 400
+
+    headers = [str(h or "").strip() for h in grid[0]]
+    columns = {}
+    for name in excluded:
+        index = next((i for i, h in enumerate(headers) if h == name), None)
+        if index is None:
+            index = next((i for i, h in enumerate(headers)
+                          if h and (name in h or h in name)), None)
+        if index is not None:
+            columns[name] = index
+    if not columns:
+        return jsonify({"error": f"成绩单里没有可匹配的维度（需要有列名：{'、'.join(excluded)}）"}), 400
+
+    key_col = next((i for i, h in enumerate(headers) if "学号" in h), None)
+    name_col = next((i for i, h in enumerate(headers) if "姓名" in h), None)
+    if key_col is None and name_col is None:
+        return jsonify({"error": "成绩单需要「学号」或「姓名」列"}), 400
+
+    scores = {name: {} for name in columns}
+    raw = {name: {} for name in columns}
+    for row in grid[1:]:
+        key = ""
+        for col in (key_col, name_col):
+            if col is not None and col < len(row) and str(row[col] or "").strip():
+                key = str(row[col]).strip()
+                break
+        if key.endswith(".0"):
+            key = key[:-2]
+        if not key:
+            continue
+        for name, index in columns.items():
+            if index >= len(row):
+                continue
+            value = _score_value(row[index])
+            if value is None:
+                continue
+            scores[name][key] = value
+            raw[name][key] = str(row[index])
+
+    if not any(scores.values()):
+        return jsonify({"error": "成绩单里没有可用分数（A–E 或 0–100）"}), 400
+
+    data = {"file": sanitize_filename(upload.filename), "at": int(time.time()),
+            "scores": scores, "raw": raw}
+    external_scores.save(session_dir(), data)
+    state["external"] = data
+    applied = _apply_external()
+    _export_all()
+    return jsonify({"ok": True, "file": data["file"], "applied": applied,
+                    "dimensions": {name: len(values) for name, values in scores.items()}})
+
+
+# ---------------------------------------------------------------- 样本校准
+def _pilot_path():
+    return os.path.join(session_dir(), "pilot", "pilot.json")
+
+
+def _load_pilot():
+    try:
+        with open(_pilot_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("reports", [])
+    data.setdefault("confirmed_at", 0)
+    data.setdefault("rubric_hash", "")
+    return data
+
+
+def _save_pilot(data):
+    path = _pilot_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _rubric_hash():
+    criteria = (state.get("rubric_json") or {}).get("criteria") or []
+    raw = json.dumps(criteria, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _rubric_confirmed():
+    pilot = _load_pilot()
+    return bool(pilot.get("confirmed_at")) and pilot.get("rubric_hash") == _rubric_hash()
+
+
+def _pilot_text_path(entry):
+    return os.path.join(session_dir(), entry.get("text") or "")
+
+
+@app.route("/pilot/upload", methods=["POST"])
+def pilot_upload():
+    files = request.files.getlist("pilot_files")
+    if not files:
+        return jsonify({"error": "未收到测试报告"}), 400
+    data = _load_pilot()
+    if len(data["reports"]) + len(files) > 5:
+        return jsonify({"error": "样本校准最多 5 份报告"}), 400
+    upload_dir = os.path.join(session_sub("pilot"), "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    extractor = ReportExtractor(os.path.join(session_sub("pilot"), "reports"), state["config"])
+    for upload in files:
+        name = sanitize_filename(upload.filename)
+        path = os.path.join(upload_dir, name)
+        upload.save(path)
+        result = extractor._process_single(path)
+        if result.get("status") != "ok":
+            return jsonify({"error": f"{name} 解析失败：{result.get('reason') or '无文本'}"}), 400
+        text_path = os.path.join(result["meta"]["output_dir"], "text.md")
+        data["reports"] = [r for r in data["reports"] if r.get("filename") != name]
+        data["reports"].append({
+            "filename": name,
+            "chars": len(_read_text(text_path)),
+            "text": os.path.relpath(text_path, session_dir()),
+            "ai": {}, "teacher": {}, "status": "pending",
+        })
+    _save_pilot(data)
+    return jsonify({"ok": True, "count": len(data["reports"])})
+
+
+@app.route("/pilot/run", methods=["POST"])
+def pilot_run():
+    if not state.get("rubric_json"):
+        return jsonify({"error": "请先生成评分细则"}), 400
+    data = _load_pilot()
+    if not data["reports"]:
+        return jsonify({"error": "请先上传测试报告"}), 400
+    if task_running():
+        return jsonify({"error": "有任务正在进行，请稍候"}), 409
+    task_start("pilot", url_for("rubric_review"))
+
+    def work():
+        try:
+            grader = Grader(state["rubric_json"], llm_client=llm(state["config"]),
+                            config=state["config"],
+                            output_dir=os.path.join(session_sub("pilot"), "grading"),
+                            kb_session_dir=os.path.join(session_sub("pilot"), "kb"))
+            total = len(data["reports"])
+            for index, entry in enumerate(data["reports"]):
+                if task_cancelled():
+                    task_finish("cancelled")
+                    return
+                task_update(progress=90 * index / total, detail=entry["filename"])
+                text = _read_text(_pilot_text_path(entry))
+                chunks = _chunks(text)
+                assignments = grader.assign_items(
+                    [{"id": f"p{i}", "text": chunk[:300]} for i, chunk in enumerate(chunks)],
+                    shots_query=text[:1500])
+                outcome = grader.grade_single(entry["filename"], text)
+                scores = (outcome["result"].get("grading") or {}).get("scores") or {}
+                entry["ai"] = {name: detail.get("level") for name, detail in scores.items()
+                               if detail.get("level")}
+                entry["chunks"] = chunks
+                entry["assignments"] = assignments
+                entry["status"] = outcome["result"].get("status")
+                task_update(done=index + 1)
+            _save_pilot(data)
+            task_update(progress=100, stage="完成",
+                        detail=f"已用模型评完 {len(data['reports'])} 份样本")
+            task_finish("done")
+        except Exception as exc:
+            task_finish("cancelled" if task_cancelled() else "error", exc)
+
+    threading.Thread(target=work, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/pilot/teacher", methods=["POST"])
+def pilot_teacher():
+    payload = request.get_json(silent=True) or {}
+    levels = payload.get("levels") or {}
+    data = _load_pilot()
+    for entry in data["reports"]:
+        incoming = levels.get(entry["filename"]) or {}
+        entry["teacher"] = {name: level for name, level in incoming.items()
+                            if level in VALID_LEVELS}
+    _save_pilot(data)
+    return jsonify({"ok": True})
+
+
+@app.route("/pilot/text/<path:filename>")
+def pilot_text(filename):
+    data = _load_pilot()
+    entry = next((item for item in data["reports"] if item.get("filename") == filename), None)
+    if not entry:
+        return jsonify({"error": "样本不存在"}), 404
+    return jsonify({"text": _read_text(_pilot_text_path(entry))})
+
+
+@app.route("/pilot/confirm", methods=["POST"])
+def pilot_confirm():
+    if not state.get("rubric_json"):
+        return jsonify({"error": "请先生成评分细则"}), 400
+    data = _load_pilot()
+    data["confirmed_at"] = time.time()
+    data["rubric_hash"] = _rubric_hash()
+    _save_pilot(data)
+    return jsonify({"ok": True, "confirmed": True})
+
+
+@app.route("/api/pilot")
+def api_pilot():
+    data = _load_pilot()
+    rubric = state.get("rubric_json") or {}
+    names = [c["name"] for c in rubric.get("criteria", [])]
+    pairs, per_dim = [], {name: [] for name in names}
+    for entry in data["reports"]:
+        for name in names:
+            ai, teacher = (entry.get("ai") or {}).get(name), (entry.get("teacher") or {}).get(name)
+            if ai and teacher:
+                pairs.append((ai, teacher))
+                per_dim.setdefault(name, []).append((ai, teacher))
+    metrics = {"cohen_kappa": agreement.cohen_kappa(pairs),
+               "weighted_kappa": agreement.weighted_kappa(pairs),
+               "krippendorff_alpha": agreement.krippendorff_alpha(pairs),
+               "n": len(pairs)}
+    confirmed = bool(data.get("confirmed_at")) and data.get("rubric_hash") == _rubric_hash()
+    reports = [{key: value for key, value in entry.items() if key != "text"}
+               for entry in data["reports"]]
+    return jsonify({
+        "reports": reports,
+        "agreement": metrics,
+        "dimensions": [{"name": name,
+                        "n": len(per_dim.get(name) or []),
+                        "cohen_kappa": agreement.cohen_kappa(per_dim.get(name) or [])}
+                       for name in names],
+        "confirmed": confirmed,
+        "confirmedAt": data.get("confirmed_at") or 0,
+        "needsConfirm": bool(data.get("confirmed_at")) and not confirmed,
+        "hasRubric": bool(rubric),
+    })
 
 
 @app.route("/task")
@@ -448,11 +777,23 @@ def rubric_table_save():
     warnings = rubric_io.check_vague_and_refs(criteria)
     if warnings and not data.get("force"):
         return jsonify({"warnings": warnings}), 409
+    previous = {c["name"]: c for c in (state.get("rubric_json") or {}).get("criteria", [])}
+    for criterion in criteria:
+        old = previous.get(criterion.get("name"))
+        if not old:
+            continue
+        changed = any(json.dumps(criterion.get(key), sort_keys=True, ensure_ascii=False)
+                      != json.dumps(old.get(key), sort_keys=True, ensure_ascii=False)
+                      for key in ("levels", "doc_ref", "mechanical", "excluded"))
+        if changed:
+            criterion["edited"] = True
     rubric_json = {"criteria": rubric_io.normalize_weights(criteria)}
     state["rubric_json"] = rubric_json
     state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
     state["rubric_warnings"] = []
     _save_rubric(rubric_json)
+    if os.path.exists(_pilot_path()):
+        _save_pilot(_load_pilot())
     return jsonify({"ok": True})
 
 
@@ -540,6 +881,7 @@ def upload_reports():
         name = sanitize_filename(f.filename)
         f.save(os.path.join(upload_dir, name))
         saved.append(name)
+    state["report_uploads"] = saved
     return jsonify({"ok": True, "count": len(saved), "filenames": saved})
 
 
@@ -560,8 +902,15 @@ def process_reports():
             seen_hashes = {h for h in (_text_hash(r) for r in prev) if h}
             extractor = ReportExtractor(session_sub("reports"), state["config"])
             fields = _student_fields()
-            all_files = [p for p in collect_report_files(session_sub("uploads"))
-                         if not os.path.basename(p).startswith("calibration_")]
+            upload_dir = session_sub("uploads")
+            queued = [os.path.join(upload_dir, n) for n in (state.get("report_uploads") or [])
+                      if os.path.isfile(os.path.join(upload_dir, n))]
+            if queued:
+                all_files = queued
+            else:
+                all_files = [p for p in collect_report_files(upload_dir)
+                             if not os.path.basename(p).startswith(
+                                 ("calibration_", "criteria_", "experiment_"))]
             total = len(all_files)
             if not total:
                 task_finish("error", "uploads 目录中没有可处理的报告文件")
@@ -597,6 +946,7 @@ def process_reports():
                 task_finish("cancelled")
                 return
             state["extracted_reports"] = kept
+            state["report_uploads"] = []
             detail = f"共 {len(kept)} 份" + (f"，自动去除 {dup} 份重复" if dup else "")
             task_update(progress=100, stage="完成", detail=detail)
             task_finish("done")
@@ -838,6 +1188,7 @@ def _export_all():
     grader = state["grader"]
     if not grader:
         return
+    _apply_external()
     students, suspicious, missing = _classify_students()
     grader.export_results()
     grader.export_excel(roster=load_roster(), students=students,
@@ -1146,7 +1497,9 @@ def _select_context(error=None):
     stale_ids = {rid for rid, r in statuses.items() if _result_stale(r)}
     return {"reports": candidates, "graded_ids": graded, "statuses": statuses,
             "stale_ids": stale_ids, "groups": [groups[g] for g in order],
-            "hint": hint, "error": error, "has_rubric": bool(state.get("rubric_json") or state.get("rubric"))}
+            "hint": hint, "error": error,
+            "has_rubric": bool(state.get("rubric_json") or state.get("rubric")),
+            "rubric_confirmed": _rubric_confirmed()}
 
 
 @app.route("/grading_select")
@@ -1159,6 +1512,11 @@ def start_grading():
     wants_json = "application/json" in (request.headers.get("Accept") or "")
     if not state.get("rubric_json") and not state.get("rubric"):
         return jsonify({"error": "尚未配置评分细则"}), 400
+    pilot = _load_pilot()
+    if state.get("rubric_json") and (not pilot.get("confirmed_at")
+                                     or pilot.get("rubric_hash") != _rubric_hash()):
+        message = "请先在「评分细则」完成样本校准并确认，再开始评分"
+        return jsonify({"error": message, "needConfirm": True}), 409
     with state["grading_lock"]:
         if (state.get("grading_status") or {}).get("phase") == "running":
             if wants_json:
@@ -1514,13 +1872,22 @@ def api_rubric():
     rubric = state.get("rubric_json")
     uploads = os.path.join(session_dir(), "uploads")
     names = os.listdir(uploads) if os.path.isdir(uploads) else []
+    external = state.get("external") or {}
+    counts = {name: len(values or {})
+              for name, values in (external.get("scores") or {}).items()}
+    criteria = [{**c, "can_exclude": rubric_io.is_non_report(c),
+                 "external_count": counts.get(c.get("name"), 0)}
+                for c in ((rubric or {}).get("criteria") or [])]
     return jsonify({
-        "rubric": rubric,
-        "criteria": (rubric or {}).get("criteria") or [],
+        "rubric": {**(rubric or {}), "criteria": criteria} if rubric else rubric,
+        "criteria": criteria,
         "warnings": state.get("rubric_warnings") or [],
         "hasMarkdown": os.path.exists(os.path.join(session_dir(), "rubrics", "rubric_latest.md")),
         "uploaded": _api_criteria_uploaded(names),
         "docChars": len(state.get("criteria_doc") or ""),
+        "experimentChars": len(state.get("experiment_doc") or ""),
+        "mode": "pair" if (state.get("experiment_doc") or "").strip() else "single",
+        "external": external_scores.summary(external),
     })
 
 
@@ -1549,6 +1916,7 @@ def api_reports():
 
 @app.route("/api/report/<path:filename>")
 def api_report(filename):
+    _apply_external()
     entry = _find_entry(filename)
     if not entry or entry.get("status") != "ok":
         return jsonify({"error": "报告不存在"}), 404
@@ -1584,6 +1952,7 @@ def api_select():
                                 for r in g["reports"]]} for g in ctx["groups"]],
         "hint": ctx["hint"],
         "hasRubric": ctx["has_rubric"],
+        "rubricConfirmed": ctx.get("rubric_confirmed"),
         "error": ctx["error"],
         "total": len(ctx["reports"]),
     })
@@ -1591,6 +1960,7 @@ def api_select():
 
 @app.route("/api/results")
 def api_results():
+    _apply_external()
     results = state["grader"].results if state["grader"] else []
     approved = _approved_ids()
     running = (state.get("grading_status") or {}).get("phase") == "running"
