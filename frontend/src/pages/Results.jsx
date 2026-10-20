@@ -43,7 +43,7 @@ function draftFrom(result) {
   const levels = {};
   const reasons = {};
   Object.entries(result?.grading?.scores || {}).forEach(([name, score]) => {
-    levels[name] = score.level || "C";
+    if (score.level) levels[name] = score.level;
     reasons[name] = score.teacher_reasoning || "";
   });
   return { levels, reasons };
@@ -88,8 +88,9 @@ export default function Results() {
     if (!draft) return false;
     return Object.entries(result.grading.scores || {}).some(
       ([name, score]) =>
-        draft.levels[name] !== score.level ||
-        (draft.reasons[name] || "") !== (score.teacher_reasoning || "")
+        !score.external &&
+        (draft.levels[name] !== score.level ||
+          (draft.reasons[name] || "") !== (score.teacher_reasoning || ""))
     );
   };
 
@@ -289,19 +290,23 @@ export default function Results() {
                               {score.ai_level ? <Badge outline>AI {score.ai_level}</Badge> : null}
                               {score.teacher_adjusted ? <Badge tone="warn">已改</Badge> : null}
                             </span>
-                            <LevelPicker
-                              value={draft.levels[name] || score.level}
-                              disabled={data.running || isApproved}
-                              onChange={(level) =>
-                                setDrafts((prev) => ({
-                                  ...prev,
-                                  [result.report_id]: {
-                                    ...draft,
-                                    levels: { ...draft.levels, [name]: level },
-                                  },
-                                }))
-                              }
-                            />
+                            {score.external ? (
+                              <Badge tone="ok">成绩单 {Math.round(Number(score.score))}</Badge>
+                            ) : (
+                              <LevelPicker
+                                value={draft.levels[name] || score.level}
+                                disabled={data.running || isApproved}
+                                onChange={(level) =>
+                                  setDrafts((prev) => ({
+                                    ...prev,
+                                    [result.report_id]: {
+                                      ...draft,
+                                      levels: { ...draft.levels, [name]: level },
+                                    },
+                                  }))
+                                }
+                              />
+                            )}
                           </div>
                           {score.reasoning ? (
                             <p className="t-footnote c-secondary" style={{ marginTop: 6, lineHeight: 1.5 }}>

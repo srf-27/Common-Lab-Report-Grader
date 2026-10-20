@@ -10,23 +10,50 @@ STRUCT_RUBRIC_PROMPT = """你是评估设计专家。依据评分标准文档生
 {doc}
 
 ## 硬性要求
-1. 每个评分维度对应文档的一个章节，权重沿用文档的分值占比（合计 100）
-2. doc_ref 必填：指向该维度在文档中的具体位置（章节名/条款号）；指向不了的维度不要输出
+1. 把文档里的**全部**考核项都提取出来，包括预习报告、课堂表现、考勤、操作、自评等；不要自行删除任何维度，标注 non_report 交给用户决定是否停用。
+2. 保留文档原有的细分粒度：文档把某项拆成「方法」「结果」「现象」等子项时，子项分别成维度；不要为了减少维度数量而合并，也不要把多个评分项塞进一个维度。每个维度只收自己那一类证据。
+3. doc_ref 必填：指向该维度在文档中的具体位置（章节名/条款号）。无法指向具体条款的维度不要输出。
 3. 禁止「整体质量」「是否合理」「是否完整」等无判据条目；每级描述必须是可核对的具体判据（描述性语言，禁止评价词）
    等级 A/B/C/D/E，E = 该维度内容未实现/缺失或严重不合格（未做、整卷跑题、抄袭、白卷），不是"比 D 更差"
-4. mechanical 仅当该维度能靠正则/数值比较客观判定时才为 true，并给出 rules；否则 false、rules 为 null
-5. rules 仅支持两种：
+4. 报告里通常看不到证据的维度（预习、课堂、考勤、纪律、操作过程、自评、团队合作）标 "non_report": true，其余 false。
+   这些维度按大纲原样单列即可，不要与报告维度合并，也不要因为"报告里没有"就不输出。
+5. mechanical 仅当该维度能靠正则/数值比较客观判定时才为 true，并给出 rules；否则 false、rules 为 null
+6. rules 仅支持两种：
    {{"type": "exists", "pattern": "正则"}}
    {{"type": "numeric_compare", "pattern": "含捕获组的正则", "op": "<|<=|>|>=|==", "threshold": 数值}}
-6. 先识别实验主题（实验名称、被测参量、核心方法与仪器），各级判据必须显式绑定这些主题要素，禁止模板句。
+7. 先识别实验主题（实验名称、被测参量、核心方法与仪器），各级判据必须显式绑定这些主题要素，禁止模板句。
    学科不限：物理、化学、生物、电子、机械、计算机等实验课一律适用
-7. 每个维度的判据必须含防跑题条款：报告内容与本实验主题无关时，该维度不得高于 D 级
+8. 每个维度的判据必须含防跑题条款：报告内容与本实验主题无关时，该维度不得高于 D 级
 
 ## 输出（不要代码围栏）
 {{"criteria": [
-  {{"name": "...", "weight": 10, "mechanical": false, "doc_ref": "文档章节名",
+  {{"name": "...", "weight": 10, "mechanical": false, "non_report": false, "doc_ref": "文档章节名",
     "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}, "rules": null}}
 ]}}"""
+
+STRUCT_PAIR_PROMPT = """你是评估设计专家。给你两份材料，请只为「本次实验的实验报告」生成结构化评分细则（JSON）。
+
+## 材料 A：课程大纲（课程目标、考核方式、报告要求、分值构成）
+{outline}
+
+## 材料 B：实验流程 / 实验模板（本次实验的目的、原理、步骤、数据与产物）
+{experiment}
+
+## 硬性要求
+1. 把大纲里的**全部**考核项都提取出来，包括预习、课堂、考勤、纪律、操作、自评、团队合作；不要自己删，标 non_report 交给用户决定是否停用。
+2. 保留大纲原有的细分粒度：大纲把考核项拆成多个子项（如数据处理方法、数据处理结果）时，子项分别成维度；不要为了减少维度数量而合并。每个维度只收自己那一类证据。
+3. 权重优先沿用大纲中与报告相关的分值；大纲没有给出时，按报告结构分配，合计 100。全部维度权重合计仍为 100。
+4. doc_ref 必须同时指向大纲条目与实验环节，例如「大纲九、成绩评定方法；实验步骤 3 标准曲线」。
+5. A/B/C/D/E 判据必须绑定本实验的具体对象与数据（仪器、试剂、参数、图表、计算式），禁止「整体质量」「是否合理」这类无判据表述；E 仅用于该维度未实现/缺失、整卷跑题、抄袭或白卷。
+6. 报告里通常看不到证据的维度（预习、课堂、考勤、纪律、操作过程、自评、团队合作）标 "non_report": true，其余 false；
+   这些维度按大纲原样单列，不要与报告维度合并，也不要因为"报告里没有"就不输出。
+7. mechanical 仅当该维度能靠正则或数值比较客观判定时为 true，rules 只允许 exists / numeric_compare。
+8. ignored 只用于放重复、无法指向大纲条款或明显无效的条目；正常的考核项不要放进去。
+9. 只输出 JSON，不要代码围栏：
+{{"criteria": [{{"name": "...", "weight": 20, "mechanical": false, "non_report": false,
+  "doc_ref": "大纲章节；实验步骤",
+  "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}, "rules": null}}],
+ "ignored": [{{"name": "...", "reason": "..."}}]}}"""
 
 CELL_PROMPT = """你是评估设计专家。依据评分标准文档，只为维度「{name}」补全下列空缺字段，其余内容不要改写。
 
@@ -109,23 +136,47 @@ class RubricGenerator:
     def _ask(self, prompt):
         return _extract_json(self.llm.chat([{"role": "user", "content": prompt}], temperature=0.2))
 
-    def generate_structured(self, criteria_doc):
-        """生成结构化细则：doc_ref 缺失的维度丢弃，返回 {"criteria", "warnings"}。"""
+    def _structure(self, data):
+        """把模型输出收敛成 criteria + warnings；没有 doc_ref 的维度丢弃。"""
         from .rubric_io import new_criterion, normalize_weights
-        data = self._ask(STRUCT_RUBRIC_PROMPT.format(doc=criteria_doc))
         raw = data.get("criteria") or []
-        valid = [c for c in raw if str(c.get("doc_ref", "")).strip() and str(c.get("name", "")).strip()]
+        # 报告无关的维度允许缺 doc_ref：先收进来，交给用户在界面上决定是否停用
+        valid = [c for c in raw if str(c.get("name", "")).strip()
+                 and (str(c.get("doc_ref", "")).strip() or c.get("non_report"))]
         if not valid:
             raise ValueError("模型未生成带标准文档位置（doc_ref）的维度，请重试或更换模型")
         criteria = [new_criterion(c.get("name", ""), c.get("weight", 0), c.get("mechanical", False),
-                                  c.get("doc_ref", ""), c.get("levels"), c.get("rules"))
+                                  c.get("doc_ref", ""), c.get("levels"), c.get("rules"),
+                                  non_report=c.get("non_report", False))
                     for c in valid]
         warnings = []
         dropped = [c.get("name") or "未命名" for c in raw if c not in valid]
         if dropped:
             warnings.append({"criterion": "、".join(dropped),
                              "message": "这些维度无法指向标准文档的具体位置，已丢弃"})
+        # 非报告维度默认停用：保住报告维度的判级集中度；用户可随时取消勾选
+        if any(not item["non_report"] for item in criteria):
+            for item in criteria:
+                if item["non_report"]:
+                    item["excluded"] = True
         return {"criteria": normalize_weights(criteria), "warnings": warnings}
+
+    def generate_structured(self, criteria_doc):
+        """单份标准文档：生成结构化细则。"""
+        return self._structure(self._ask(STRUCT_RUBRIC_PROMPT.format(doc=criteria_doc)))
+
+    def generate_structured_pair(self, outline_doc, experiment_doc):
+        """大纲 + 实验流程：大纲给目标与权重，实验材料给判据落点。"""
+        data = self._ask(STRUCT_PAIR_PROMPT.format(
+            outline=outline_doc[:8000], experiment=experiment_doc[:8000]))
+        result = self._structure(data)
+        for item in data.get("ignored") or []:
+            name = str((item or {}).get("name") or "").strip()
+            if name:
+                result["warnings"].append({
+                    "criterion": name,
+                    "message": f"未纳入评分：{(item or {}).get('reason') or '报告中缺少对应证据'}"})
+        return result
 
     def generate_cells(self, criteria_doc, name, context, fields):
         maybe = {"name": name, "weight": 0, "doc_ref": "", "levels": {}, "rules": None}

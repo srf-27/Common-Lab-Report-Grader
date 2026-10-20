@@ -512,6 +512,8 @@ export function Sheet({ open, title, text, onClose, children, footer, wide }) {
   const [mounted, setMounted] = useState(open);
   const [shown, setShown] = useState(false);
   const panelRef = useRef(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
 
   useEffect(() => {
     if (open) {
@@ -525,13 +527,13 @@ export function Sheet({ open, title, text, onClose, children, footer, wide }) {
   }, [open]);
 
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || !mounted) return undefined;
     const previous = document.activeElement;
     const selector =
       'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
     const onKey = (event) => {
       if (event.key === "Escape") {
-        onClose?.();
+        closeRef.current?.();
         return;
       }
       if (event.key !== "Tab" || !panelRef.current) return;
@@ -550,12 +552,15 @@ export function Sheet({ open, title, text, onClose, children, footer, wide }) {
       }
     };
     window.addEventListener("keydown", onKey);
-    panelRef.current?.querySelector(selector)?.focus?.({ preventScroll: true });
+    // 只在打开时聚焦一次；跟着每次渲染重跑会把中文输入法的组合过程打断
+    if (!panelRef.current?.contains(document.activeElement)) {
+      panelRef.current?.querySelector(selector)?.focus?.({ preventScroll: true });
+    }
     return () => {
       window.removeEventListener("keydown", onKey);
       previous?.focus?.({ preventScroll: true });
     };
-  }, [open, onClose]);
+  }, [open, mounted]);
 
   if (!mounted) return null;
   return createPortal(
@@ -587,44 +592,57 @@ export function Sheet({ open, title, text, onClose, children, footer, wide }) {
   );
 }
 
-export function Dropzone({ accept, multiple, onFiles, title, hint, disabled }) {
+export function Dropzone({ accept, multiple, onFiles, title, hint, disabled, selected = [] }) {
   const inputRef = useRef(null);
   const [over, setOver] = useState(false);
+  const depth = useRef(0);
 
   const pick = (files) => {
     const list = Array.from(files || []);
     if (list.length) onFiles(multiple ? list : [list[0]]);
   };
 
+  const openPicker = () => {
+    if (!disabled) inputRef.current?.click();
+  };
+
+  const names = selected.map((item) => item.name || String(item));
+
   return (
     <div
-      className="list-row"
-      data-interactive={disabled ? undefined : "true"}
+      className="dropzone"
+      data-over={over ? "true" : undefined}
+      data-disabled={disabled ? "true" : undefined}
       role="button"
       tabIndex={disabled ? -1 : 0}
       aria-disabled={disabled}
-      style={{
-        flexDirection: "column",
-        justifyContent: "center",
-        minHeight: 100,
-        textAlign: "center",
-        background: over ? "color-mix(in srgb, var(--tint) 8%, transparent)" : undefined,
-        boxShadow: over ? "inset 0 0 0 2px var(--tint)" : undefined,
-      }}
-      onClick={() => !disabled && inputRef.current?.click()}
+      aria-label={title || "上传文件"}
+      onClick={openPicker}
       onKeyDown={(event) => {
-        if (!disabled && (event.key === "Enter" || event.key === " ")) {
+        if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          inputRef.current?.click();
+          openPicker();
         }
+      }}
+      onDragEnter={(event) => {
+        event.preventDefault();
+        if (disabled) return;
+        depth.current += 1;
+        setOver(true);
       }}
       onDragOver={(event) => {
         event.preventDefault();
-        if (!disabled) setOver(true);
+        if (!disabled) event.dataTransfer.dropEffect = "copy";
       }}
-      onDragLeave={() => setOver(false)}
+      onDragLeave={(event) => {
+        event.preventDefault();
+        depth.current = Math.max(0, depth.current - 1);
+        if (!depth.current) setOver(false);
+      }}
       onDrop={(event) => {
         event.preventDefault();
+        event.stopPropagation();
+        depth.current = 0;
         setOver(false);
         if (!disabled) pick(event.dataTransfer.files);
       }}
@@ -640,16 +658,19 @@ export function Dropzone({ accept, multiple, onFiles, title, hint, disabled }) {
           event.target.value = "";
         }}
       />
-      <Icon name="upload" size={22} />
-      <span style={{ fontSize: 15, fontWeight: 550, marginTop: 8, overflowWrap: "anywhere" }}>
-        {title}
-      </span>
-      <span
-        className="row-sub"
-        style={{ marginTop: 3, whiteSpace: "normal", maxWidth: "46ch", lineHeight: 1.4 }}
-      >
-        {hint}
-      </span>
+      <div className="dropzone-inner">
+        <span className="dropzone-icon" aria-hidden="true">
+          <Icon name="upload" size={22} />
+        </span>
+        <span className="dropzone-title">
+          {names.length
+            ? `已选 ${names.length} 个文件`
+            : title || "拖拽文件到这里，或点击选择"}
+        </span>
+        <span className="dropzone-hint">
+          {names.length ? names.join(" · ") : hint}
+        </span>
+      </div>
     </div>
   );
 }
