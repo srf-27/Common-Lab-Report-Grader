@@ -115,6 +115,7 @@ def test_full_click_flow():
         # 5. 选卷 → 评分
         select = client.get("/grading_select").get_data(as_text=True)
         assert "开始评分" in select and "张三" in select
+        assert client.post("/pilot/confirm").status_code == 200
         resp = client.post("/start_grading", data={"report_ids": ["张三_20230001.docx"]})
         assert resp.status_code == 302 and "/grading_progress" in resp.headers["Location"]
         _wait(lambda: (state.get("grading_status") or {}).get("phase") == "done", 120)

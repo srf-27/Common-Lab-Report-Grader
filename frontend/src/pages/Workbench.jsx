@@ -27,7 +27,7 @@ export default function Workbench() {
 
   const { rubric, reports, approved, unapproved, stage } = boot;
   const steps = [
-    { label: "评分细则", to: "/app/rubric", done: rubric.count > 0 },
+    { label: "评分细则", to: "/app/rubric", done: rubric.count > 0 && rubric.confirmed !== false },
     { label: "上传报告", to: "/app/reports", done: reports.total > 0 },
     {
       label: "逐份评分",
@@ -41,7 +41,7 @@ export default function Workbench() {
     stage.key === "rubric" && reports.total > 0 && reports.graded < reports.total
       ? 2
       : STAGE_INDEX[stage.key] ?? 0;
-  const ready = rubric.count > 0 && reports.total > 0;
+  const ready = rubric.count > 0 && reports.total > 0 && rubric.confirmed !== false;
 
   return (
     <>
@@ -164,6 +164,14 @@ export default function Workbench() {
         <div style={{ marginBottom: 22 }}>
           <Banner tone="accent" icon="info">
             还没有评分细则。上传评分标准并生成细则后，「开始评分」才会启用。
+          </Banner>
+        </div>
+      ) : null}
+
+      {rubric.count && rubric.confirmed === false ? (
+        <div style={{ marginBottom: 22 }}>
+          <Banner tone="warn" icon="alert">
+            评分细则还没确认：先到「评分细则」用 1–5 份样本校准，确认后才能开始评分。
           </Banner>
         </div>
       ) : null}

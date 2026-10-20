@@ -57,6 +57,16 @@ htmlcov/
 # mypy
 .mypy_cache/
 
+# Flutter 客户端（独立分支维护）
+app/
+
+# 本地运行时与工具产物
+.runtime/
+installer/.dart_tool/
+installer/windows/flutter/ephemeral/
+installer/build/
+*.iml
+
 # 根目录生成物（一致性报告等）
 /output/
 

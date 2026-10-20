@@ -7,6 +7,7 @@ import threading
 import time
 
 from ..nodes import rubric_io
+from ..nodes import external_scores
 from .usage import load as load_usage
 from ..nodes.grader import Grader
 from ..factory import llm
@@ -27,7 +28,10 @@ state = {
     "rubric": None,
     "rubric_json": None,
     "criteria_doc": "",
+    "experiment_doc": "",
+    "external": {},
     "extracted_reports": [],
+    "report_uploads": [],
     "grader": None,
     "corrections": {},
     "calibration": None,
@@ -151,10 +155,13 @@ def hydrate_session(sid):
     state["session"] = sid
     state["corrections"] = {}
     state["extracted_reports"] = []
+    state["report_uploads"] = []
     state["grader"] = None
     state["rubric"] = None
     state["rubric_json"] = None
     state["criteria_doc"] = ""
+    state["experiment_doc"] = ""
+    state["external"] = {}
     state["calibration"] = None
     state["grading_status"] = None
     state["mcp_status"] = []
@@ -175,6 +182,10 @@ def hydrate_session(sid):
     if os.path.exists(doc_path):
         with open(doc_path, "r", encoding="utf-8") as f:
             state["criteria_doc"] = f.read()
+    experiment_path = os.path.join(session_dir(sid), "rubrics", "experiment_doc.txt")
+    if os.path.exists(experiment_path):
+        with open(experiment_path, "r", encoding="utf-8") as f:
+            state["experiment_doc"] = f.read()
 
     reports_dir = os.path.join(session_dir(sid), "reports")
     for name in sorted(os.listdir(reports_dir)):
@@ -191,6 +202,14 @@ def hydrate_session(sid):
                         similarity_scope=sid, kb_session_dir=session_dir(sid))
         grader.results = results
         state["grader"] = grader
+
+    external = external_scores.load(session_dir(sid))
+    if external and state["rubric_json"] and state["grader"]:
+        students = {r["meta"]["filename"]: (r["meta"].get("student") or {})
+                    for r in state["extracted_reports"]}
+        external_scores.apply_to_results(state["grader"].results, state["rubric_json"],
+                                         external, students.get)
+    state["external"] = external
 
     state["approved_ids"] = load_approved()
     state["mcp"] = load_mcp_mount(sid)

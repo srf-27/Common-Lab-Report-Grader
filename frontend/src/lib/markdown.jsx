@@ -31,9 +31,16 @@ function toHtml(text) {
       para = [];
     }
   };
+  const cellsOf = (line) =>
+    line
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
 
-  for (const raw of lines) {
-    const line = raw.trim();
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
     // 公式块可能跨空行，块内不切段，否则 \[ 与 \] 会落进不同 <p>，KaTeX 无法识别
     if (math) {
       para.push(line);
@@ -43,6 +50,33 @@ function toHtml(text) {
     if (!line) {
       closePara();
       closeList();
+      continue;
+    }
+    // Markdown 表格：表头 + |---| 分隔行，直到出现非表格行
+    if (
+      line.startsWith("|") &&
+      index + 1 < lines.length &&
+      /^\|[\s:|-]+\|$/.test(lines[index + 1].trim())
+    ) {
+      closePara();
+      closeList();
+      const head = cellsOf(line);
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim().startsWith("|")) {
+        rows.push(cellsOf(lines[index]));
+        index += 1;
+      }
+      index -= 1;
+      out.push('<div class="table-wrap"><table><thead><tr>');
+      head.forEach((cell) => out.push(`<th>${inline(cell)}</th>`));
+      out.push("</tr></thead><tbody>");
+      rows.forEach((row) => {
+        out.push("<tr>");
+        head.forEach((_, cellIndex) => out.push(`<td>${inline(row[cellIndex] || "")}</td>`));
+        out.push("</tr>");
+      });
+      out.push("</tbody></table></div>");
       continue;
     }
     const heading = line.match(/^(#{1,4})\s+(.*)$/);

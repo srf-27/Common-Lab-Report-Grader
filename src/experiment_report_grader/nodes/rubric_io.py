@@ -1,3 +1,4 @@
+import difflib
 import json
 import os
 
@@ -5,11 +6,14 @@ LEVELS = ("A", "B", "C", "D", "E")
 RUBRIC_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "output", "rubrics", "rubric_current.json")
 
 
-def new_criterion(name="", weight=0, mechanical=False, doc_ref="", levels=None, rules=None):
+def new_criterion(name="", weight=0, mechanical=False, doc_ref="", levels=None, rules=None,
+                  excluded=False, non_report=False):
     return {
         "name": name,
         "weight": round(weight, 2),
         "mechanical": bool(mechanical),
+        "excluded": bool(excluded),
+        "non_report": bool(non_report),
         "doc_ref": doc_ref,
         "levels": levels or {lv: "" for lv in LEVELS},
         "user_edited": [],
@@ -82,13 +86,46 @@ def compute_subtotals(scores, rubric):
     mech_names = {c["name"] for c in rubric.get("criteria", []) if c.get("mechanical")}
     for criterion, detail in scores.items():
         w = weights.get(criterion, fallback)
-        pts = LEVEL_POINTS.get(detail.get("level"), 0) * w / 100.0
+        # 外部成绩单直接给百分制分数；其余按等级换算
+        points = detail.get("score")
+        if points is None:
+            points = LEVEL_POINTS.get(detail.get("level"), 0)
+        pts = float(points) * w / 100.0
         if criterion in mech_names:
             procedural += pts
         else:
             semantic += pts
     return {"procedural": round(procedural, 1), "semantic": round(semantic, 1),
             "total": round(procedural + semantic, 1)}
+
+
+# 只能靠课堂/平时成绩评定、报告里通常没有证据的维度
+NON_REPORT_TERMS = ("预习", "课堂", "出勤", "考勤", "纪律", "卫生", "操作",
+                    "自评", "团队", "平时", "答辩", "汇报", "提问")
+
+
+def match_criterion(name, names):
+    """把模型返回的维度名对齐到细则名单：精确 → 包含 → 相似度。"""
+    text = str(name or "").strip()
+    if not text:
+        return None
+    if text in names:
+        return text
+    contained = [item for item in names if item and (item in text or text in item)]
+    if contained:
+        return max(contained, key=len)
+    close = difflib.get_close_matches(text, [item for item in names if item], n=1, cutoff=0.45)
+    return close[0] if close else None
+
+
+def is_non_report(criterion):
+    """维度是否明显与报告无关（用于决定「停用评分」是否可勾选）。"""
+    if criterion.get("non_report"):
+        return True
+    name = str(criterion.get("name") or "")
+    doc_ref = str(criterion.get("doc_ref") or "")
+    return (any(term in name for term in NON_REPORT_TERMS)
+            or any(term in doc_ref for term in ("预习", "课堂", "考勤", "出勤", "纪律", "卫生")))
 
 
 VAGUE_TERMS = ("整体质量", "是否合理", "是否完整", "总体印象", "综合表现")

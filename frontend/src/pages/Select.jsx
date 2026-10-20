@@ -147,6 +147,22 @@ export default function Select() {
         </div>
       ) : null}
 
+      {data?.hasRubric && data.rubricConfirmed === false ? (
+        <div style={{ marginBottom: 16 }}>
+          <Banner
+            tone="warn"
+            icon="alert"
+            actions={
+              <LinkButton to="/app/rubric" size="sm">
+                去校准
+              </LinkButton>
+            }
+          >
+            评分细则还没确认：先用 1–5 份样本校准并确认，才能开始评分。
+          </Banner>
+        </div>
+      ) : null}
+
       {data?.error ? (
         <div style={{ marginBottom: 16 }}>
           <Banner tone="danger" icon="alert">
@@ -281,7 +297,7 @@ export default function Select() {
           <Button
             variant="filled"
             icon="play"
-            disabled={!selected.size || busy || !data?.hasRubric}
+            disabled={!selected.size || busy || !data?.hasRubric || data?.rubricConfirmed === false}
             loading={busy}
             onClick={start}
           >

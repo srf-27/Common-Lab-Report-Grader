@@ -2938,3 +2938,183 @@ button:disabled {
     border-bottom-color: var(--separator);
   }
 }
+
+/* 上传框：外层虚线区 + 内层白卡，两层之间留出呼吸空间 */
+.dropzone {
+  margin: 12px 14px 10px;
+  padding: 0;
+  border-radius: 11px;
+  cursor: pointer;
+}
+
+.dropzone[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.dropzone:focus-visible {
+  outline: 2px solid var(--tint);
+  outline-offset: 3px;
+}
+
+.dropzone-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 132px;
+  padding: 24px 18px;
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--separator);
+  border-radius: 11px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition: border-color var(--dur-2) var(--ease-out),
+    background var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dropzone:not([data-disabled="true"]):hover .dropzone-inner {
+    border-color: color-mix(in srgb, var(--tint) 45%, var(--separator));
+  }
+}
+
+.dropzone[data-over="true"] .dropzone-inner {
+  border-color: var(--tint);
+  background: color-mix(in srgb, var(--tint) 4%, var(--surface));
+}
+
+.dropzone[data-over="true"] .dropzone-inner {
+  transform: translateY(-1px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04),
+    0 0 0 2px color-mix(in srgb, var(--tint) 32%, transparent);
+}
+
+.dropzone-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 6px;
+  border-radius: 50%;
+  color: var(--tint);
+  background: color-mix(in srgb, var(--tint) 10%, transparent);
+}
+
+.dropzone-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--label);
+}
+
+.dropzone-hint {
+  max-width: 46ch;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--label-3);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 640px) {
+  .dropzone {
+    margin: 10px 10px 8px;
+    padding: 0;
+  }
+
+  .dropzone-inner {
+    min-height: 112px;
+    padding: 18px 12px;
+  }
+}
+
+/* 可勾选行：与开关区分，用于“停用该维度”这类带说明的选项 */
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 0;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--label);
+  cursor: pointer;
+}
+
+.check input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--tint);
+  flex: none;
+}
+
+.check[data-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.check[data-disabled="true"] input {
+  cursor: not-allowed;
+}
+
+/* 报告原文里的表格：DOCX/PDF 提取出的 Markdown 表格 */
+.prose .table-wrap {
+  margin: 10px 0 14px;
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.prose table {
+  border-collapse: collapse;
+  min-width: 60%;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--separator);
+  padding: 6px 9px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.prose th {
+  background: var(--fill);
+  font-weight: 600;
+}
+
+.prose td {
+  color: var(--label-2);
+}
+
+/* 维度行里的“保留分值”紧凑勾选 */
+.check-inline {
+  min-height: 0;
+  padding: 0;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--label-2);
+  white-space: nowrap;
+}
+
+.check-inline input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.check-inline[data-disabled="true"] {
+  opacity: 0.35;
+}
+
+@media (max-width: 760px) {
+  .check-label {
+    display: none;
+  }
+}
