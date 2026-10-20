@@ -173,9 +173,11 @@ export default function Rubric() {
       const changes = {};
       if (filled.weight !== undefined) changes.weight = filled.weight;
       if (filled.doc_ref !== undefined) changes.doc_ref = filled.doc_ref;
+      // 后端按 CELL_PROMPT 返回 {"levels": {"A": ...}}，兼容旧的扁平结构
+      const incoming = filled.levels && typeof filled.levels === "object" ? filled.levels : filled;
       const levels = { ...item.levels };
       LEVELS.forEach((level) => {
-        if (filled[level]) levels[level] = filled[level];
+        if (incoming[level]) levels[level] = incoming[level];
       });
       changes.levels = levels;
       patch(index, changes);

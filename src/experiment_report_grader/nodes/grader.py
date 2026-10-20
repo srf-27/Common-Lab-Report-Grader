@@ -102,6 +102,53 @@ class Grader:
         self.remembered = None
         self.verifier_code = None
         self.verifier_error = ""
+        self._checks_cache = None
+
+    # ---------- 检测结果缓存 ----------
+    def _checks_path(self):
+        return os.path.join(self.output_dir, "checks_cache.json")
+
+    def _load_checks(self):
+        if self._checks_cache is None:
+            try:
+                with open(self._checks_path(), encoding="utf-8") as f:
+                    self._checks_cache = json.load(f)
+            except Exception:
+                self._checks_cache = {}
+        return self._checks_cache
+
+    def _save_checks(self):
+        cache = self._checks_cache or {}
+        if len(cache) > 1000:
+            keep = sorted(cache.items(), key=lambda kv: kv[1].get("at", 0))[-1000:]
+            cache = dict(keep)
+            self._checks_cache = cache
+        path = self._checks_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+
+    def _cached_check(self, kind, text):
+        """同一份正文重评时跳过重复检测：正文不变，检测结论就不会变。"""
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        key = f"{kind}:{digest}"
+        cache = self._load_checks()
+        if key in cache:
+            return {k: v for k, v in cache[key].items() if k != "at"}
+        if kind == "injection":
+            value = detect_injection(text, self.llm)
+        else:
+            value = check_content_safety(text, self.llm)
+        # 检测失败或只审了前半段都不缓存，下次重试
+        if not value.get("detection_failed") and not value.get("truncated"):
+            cache[key] = {**value, "at": time.time()}
+            self._save_checks()
+        return value
 
     # ---------- RAG ----------
     def _dimension_collection(self, name):
@@ -321,6 +368,8 @@ class Grader:
             + "\n规则：每条只能归入一个最相关维度。表格、数据记录、公式推导、计算过程、实验步骤都是正文，"
               "必须归入对应维度；只有不含实质内容的封面/页眉元信息（实验名称、姓名、学号、班级、日期）才填 null。"
               "拿不准时归入最相关维度，禁止因为内容是表格或公式而填 null。"
+              "\n逐条快速判断即可：不要复述条目内容，不要写分析过程、理由或解释，"
+              "直接在 JSON 里给出每条的唯一维度名。"
               "\n只输出 JSON：{\"assignments\": [{\"id\": \"...\", \"criterion\": \"...\"}]}"
             + (f"\n参考范例（已终审，仅供对齐维度粒度）：\n{shots}" if shots else "")
             + "\n待归类内容（JSON）：" + json.dumps(items, ensure_ascii=False)
@@ -335,7 +384,7 @@ class Grader:
 
     # ---------- 单份评分 ----------
     def grade_single(self, report_id, text, image_descriptions=None, references=""):
-        injection = detect_injection(text, self.llm)
+        injection = self._cached_check("injection", text)
         if injection["is_injection"]:
             return self._finish({"report_id": report_id, "status": "flagged_injection",
                                  "injection_details": injection, "graded_at": time.time()}, False)
@@ -345,7 +394,7 @@ class Grader:
             return self._finish({"report_id": report_id, "status": status,
                                  "injection_details": injection, "graded_at": time.time()}, False)
 
-        safety = check_content_safety(text, self.llm)
+        safety = self._cached_check("safety", text)
         if safety["verdict"] == "blocked":
             return self._finish({"report_id": report_id, "status": "blocked_safety",
                                  "safety_details": safety, "graded_at": time.time()}, False)
