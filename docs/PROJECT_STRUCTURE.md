@@ -8,7 +8,7 @@
 run.py                  启动入口（--host / --port / --debug）
 pyproject.toml          项目元数据与依赖
 requirements.txt        pip 依赖清单
-frontend/               前端源码（React 19 + HeroUI + Tailwind + Vite），构建产物写到 static/ui/
+frontend/               前端源码（React 19 + Vite 6，无组件库），构建产物写到 static/ui/
 config/                 运行配置（config.yaml 含密钥，已 gitignore）与插件注册表 mcp.yaml
 src/                    源码（src-layout）
 tests/                  测试（run_all.py 零依赖入口、unit、integration、fixtures）
@@ -57,35 +57,31 @@ experiment_report_grader/
 │   ├── client.py              JSON-RPC 2.0 客户端（stdio 子进程 / http + SSE），
 │   │                          initialize、tools、resources、prompts；collect() 按挂载拉参考
 │   └── store.py               config/mcp.yaml 读写、表单校验
-├── templates/                 14 个 Jinja2 页面（经典版，路由 /classic），全部继承 base.html
 └── static/
     ├── ui/                    SPA 构建产物（Vite 输出，gitignore）
-    ├── css/style.css          经典版设计系统（浅色、发丝线、药丸控件、details.fold 折叠、响应式断点）
-    └── vendor/                KaTeX（公式渲染）、mammoth（DOCX 预览）
+    └── vendor/                KaTeX（公式渲染）
 ```
 
 ## 前端（SPA）
 
-`/` 与 `/app/*` 由 React 单页应用承载；`/classic` 保留 Jinja 版工作台（未构建前端产物时的兜底）。
+`/` 与 `/app/*` 只由 React 单页应用承载；旧的 Jinja 页面已全部退役，`/classic`、`/rubric_review` 等历史路径 302 到对应的 SPA 页面。
 
 ```
 frontend/
-├── package.json             @heroui/react / react 19 / framer-motion / tailwindcss 3.4 / vite 6
-├── tailwind.config.js       HIG 主题：色板、字号阶梯（display 34 → caption2 11）、圆角 10/12/14
+├── package.json             react 19 / vite 6（无 UI 组件库）
 ├── vite.config.js           base=/static/ui/，产物直出 src/experiment_report_grader/static/ui
 └── src/
-    ├── main.jsx             HeroUIProvider + 深色模式切 html.dark
-    ├── App.jsx              侧栏 / 移动端顶栏 + 底部标签栏 + 路由分发 + 原文抽屉
+    ├── app.jsx              侧栏 / 移动端底部标签栏 + 路由分发
+    ├── main.jsx             应用入口与全局 Provider
+    ├── ui/index.jsx         按钮、分组列表、Sheet、LevelPicker、Badge 等基础件
     ├── lib/
     │   ├── router.jsx       usePath / navigate / matchRoute（history API，无路由库）
-    │   ├── api.js           getJson / postForm / postJson / postFiles / pollTask / pollGrading
-    │   ├── app-context.js   全局上下文（bootstrap 数据、刷新、原文抽屉）
-    │   └── markdown.js      极简 Markdown + 跨行 \[ … \] 公式块合并
-    ├── components/
-    │   ├── ui.jsx           Icons / useLoad / PageHeader / Panel / Field / Empty / StatusChip / Note
-    │   └── content.jsx      MarkdownBlock（KaTeX）、Reader（PDF / DOCX / 文本分页）
-    └── pages/               11 个页面：Workbench、Rubric、Calibration、Reports、ReportDetail、
-                             Select、Progress、Results、Roster、Settings、Mcp
+    │   ├── api.js           getJSON / postForm / postFormJSON / postJSON / postEmpty
+    │   ├── hooks.js         useData / usePoll / useMedia 等
+    │   ├── store.jsx        课程会话与 bootstrap 上下文
+    │   └── markdown.jsx     Markdown + 表格 + KaTeX 公式
+    └── pages/               12 个页面：Workbench、Rubric、Reports、ReportDetail、Select、
+                             Progress、Results、Roster、Calibration、Settings、Mcp、Usage
 ```
 
 写操作复用 Flask 的表单端点（`/upload_criteria`、`/start_grading`、`/update_scores` 等），
@@ -149,7 +145,7 @@ data/output/sessions/<课程ID>/
 | 换嵌入模型 | 「配置」页 `embedding.backend=openai` + 模型名 |
 | 加机械判决规则类型 | `nodes/verifier.py::_verify_one` 增加分支，并在细则生成提示词里同步允许的 type |
 | 改评分提示词 | `nodes/grader.py::GRADING_PROMPT`（保持 JSON 输出契约） |
-| 加页面 | SPA：`frontend/src/pages/` 新建页面 + `App.jsx` 的 `Page` 与 `NAV`；经典版：`templates/` 新模板 + `app.py` 路由 + `_NAV` |
+| 加页面 | `frontend/src/pages/` 新建页面 + `app.jsx` 的 `Page` 与 `NAV` |
 | 改判级分值 | `nodes/rubric_io.py::LEVEL_POINTS`（导出与一致性同步生效） |
 
 ## 受保护文件（文件首行 `checked`）

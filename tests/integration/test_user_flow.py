@@ -68,9 +68,9 @@ def test_full_click_flow():
         app.config["TESTING"] = True
         client = app.test_client()
 
-        # 空课程：开始评分按钮不可交互
-        home = client.get("/classic").get_data(as_text=True)
-        assert 'aria-disabled="true"' in home and "尚未配置评分细则" in home
+        # 空课程：还没有细则，阶段应停在初始
+        boot = client.get("/api/bootstrap").get_json()
+        assert boot["rubric"]["count"] == 0 and boot["stage"]["key"] == "initial"
 
         # 1. 上传并生成细则
         resp = client.post("/upload_criteria", data={
@@ -84,7 +84,7 @@ def test_full_click_flow():
         assert Path(state_mod.session_dir(), "rubrics", "rubric_current.json").exists()
 
         # 2. 细则页：保存编辑后的权重
-        assert client.get("/rubric_review").status_code == 200
+        assert client.get("/app/rubric").status_code == 200
         payload = {"criteria": state["rubric_json"]["criteria"]}
         payload["criteria"][0]["weight"] = 80
         assert client.post("/rubric_table_save", json=payload).get_json()["ok"] is True
@@ -105,19 +105,20 @@ def test_full_click_flow():
         assert "自动去除 1 份重复" in state["task"]["detail"]
 
         # 4. 报告页与原文阅读器
-        detail = client.get("/report/张三_20230001.docx")
-        assert detail.status_code == 200
-        assert "误差分析" in detail.get_data(as_text=True)
+        detail = client.get("/api/report/张三_20230001.docx").get_json()
+        assert "误差分析" in json.dumps(detail, ensure_ascii=False)
         pages = client.get("/report_text/张三_20230001.docx").get_json()
         assert pages["pages"] and "逐差法" in "\n".join(pages["pages"][0])
         assert client.get("/report_original/张三_20230001.docx").status_code == 200
 
         # 5. 选卷 → 评分
-        select = client.get("/grading_select").get_data(as_text=True)
-        assert "开始评分" in select and "张三" in select
+        select = client.get("/api/select").get_json()
+        assert select["hasRubric"] is True
+        assert "张三_20230001.docx" in [r["filename"] for g in select["groups"]
+                                       for r in g["reports"]]
         assert client.post("/pilot/confirm").status_code == 200
         resp = client.post("/start_grading", data={"report_ids": ["张三_20230001.docx"]})
-        assert resp.status_code == 302 and "/grading_progress" in resp.headers["Location"]
+        assert resp.status_code == 302 and "/app/results" in resp.headers["Location"]
         _wait(lambda: (state.get("grading_status") or {}).get("phase") == "done", 120)
         results = state["grader"].results
         assert [r["report_id"] for r in results] == ["张三_20230001.docx"]
@@ -126,7 +127,8 @@ def test_full_click_flow():
         assert results[0]["grading"]["subtotals"]["total"] > 0
 
         # 6. 结果页：改等级 → 终审 → 导出
-        assert "总分" in client.get("/grading_done").get_data(as_text=True)
+        summary = client.get("/api/results").get_json()
+        assert summary["results"] and summary["counts"]["graded"] >= 1
         level_form = {"report_id": "张三_20230001.docx",
                       "level::误差分析": "B", "reason::误差分析": "证据不足"}
         client.post("/update_scores", data=level_form)
@@ -175,8 +177,8 @@ def test_full_click_flow():
         csv = "学号,姓名\n20230001,张三\n20230002,李四\n20230003,王五\n".encode("utf-8-sig")
         client.post("/roster/upload", data={"roster_file": (io.BytesIO(csv), "roster.csv")},
                     content_type="multipart/form-data")
-        roster_page = client.get("/roster").get_data(as_text=True)
-        assert "名册人数" in roster_page and "王五" in roster_page
+        roster = client.get("/api/roster").get_json()["roster"]
+        assert any(row.get("姓名") == "王五" for row in roster["rows"])
     finally:
         state_mod.OUTPUT_FOLDER, state_mod.SESSIONS_DIR = real_output, real_sessions
         mcp_store.CONFIG_PATH = real_mcp
@@ -186,9 +188,23 @@ def test_full_click_flow():
 
 def test_pages_render_for_every_route():
     client = app.test_client()
-    for url in ("/", "/classic", "/rubric_review", "/reports_list", "/roster", "/settings", "/mcp",
-                "/grading_select", "/grading_done", "/grading_progress", "/task_status"):
+    for url in ("/", "/app", "/app/workbench", "/app/rubric", "/task_status"):
         assert client.get(url).status_code == 200, url
+    redirects = {
+        "/classic": "/app/workbench",
+        "/rubric_review": "/app/rubric",
+        "/reports_list": "/app/reports",
+        "/roster": "/app/roster",
+        "/settings": "/app/settings",
+        "/mcp": "/app/mcp",
+        "/grading_select": "/app/select",
+        "/grading_progress": "/app/results",
+        "/grading_done": "/app/results",
+        "/task": "/app/",
+    }
+    for url, target in redirects.items():
+        resp = client.get(url)
+        assert resp.status_code == 302 and target in resp.headers["Location"], url
 
 
 if __name__ == "__main__":
@@ -233,9 +249,9 @@ def test_report_with_image_renders():
         assert entry["images"], "补水后应还原图片列表"
 
         from urllib.parse import quote
-        html = client.get("/report/带图报告.docx").get_data(as_text=True)
+        detail = client.get("/api/report/带图报告.docx").get_json()
         image = entry["images"][0]["filename"]
-        assert f"/report_image/{quote('带图报告.docx')}/{quote(image)}" in html
+        assert image in json.dumps(detail, ensure_ascii=False)
         assert client.get(f"/report_image/{quote('带图报告.docx')}/{quote(image)}").status_code == 200
         assert client.get(f"/report_image/{quote('带图报告.docx')}/nope.png").status_code == 404
     finally:
@@ -284,8 +300,8 @@ def test_settings_protocol_switch():
         assert saved["llm"]["custom"]["api_key"] == "sk-test"
         assert saved["llm"]["ollama"]["model"] == "qwen2.5:7b", "自定义协议不应覆盖 Ollama 配置"
 
-        html = client.get("/settings").get_data(as_text=True)
-        assert '<option value="custom" selected>' in html
+        cfg_api = client.get("/api/settings").get_json()
+        assert cfg_api["llm"]["backend"] == "custom"
     finally:
         app_mod.CONFIG_PATH = real_path
         app_mod.state["config"] = real_cfg
