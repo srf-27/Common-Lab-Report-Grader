@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { errorText, getJSON } from "../lib/api";
+import { errorText, getJSON, postEmpty } from "../lib/api";
 import { useData } from "../lib/hooks";
+import { toast } from "../lib/toast";
 import { Prose } from "../lib/markdown";
 import {
   Badge,
@@ -11,6 +12,7 @@ import {
   Group,
   ListRow,
   PageHead,
+  Sheet,
   Spinner,
   Stat,
 } from "../ui";
@@ -27,14 +29,43 @@ const metaText = (value) => {
 
 function VectorList() {
   const { data, error, loading, load } = useData("/api/vector");
+  const [confirming, setConfirming] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const collections = data?.collections || [];
+  const itemCount = collections.reduce((sum, item) => sum + (Number(item.count) || 0), 0);
+
+  const clearAll = async () => {
+    setClearing(true);
+    try {
+      const result = await postEmpty("/api/vector/clear");
+      toast(`已清空 ${result.deleted || 0} 个 collection`, "ok");
+      setConfirming(false);
+      load();
+    } catch (err) {
+      toast(errorText(err), "danger");
+    } finally {
+      setClearing(false);
+    }
+  };
 
   return (
     <>
       <PageHead
         title="向量库"
-        sub="当前课程的 Chroma collection；只读预览，不会改动数据"
-        actions={<Button icon="refresh" onClick={load}>刷新</Button>}
+        sub="当前课程的 Chroma collection；可只读预览，也可清空重建"
+        actions={
+          <>
+            <Button icon="refresh" onClick={load}>刷新</Button>
+            <Button
+              variant="destructive"
+              icon="trash"
+              disabled={!collections.length || clearing}
+              onClick={() => setConfirming(true)}
+            >
+              清空向量库
+            </Button>
+          </>
+        }
       />
 
       {error ? (
@@ -51,12 +82,12 @@ function VectorList() {
         <Empty
           icon="database"
           title="还没有 collection"
-          text="完成一次评分或终审后，案例库与维度参考库会自动出现在这里。"
+          text="确认评分细则后，系统会按维度建立 collection；终审后才写入内容。"
         />
       ) : null}
 
       {collections.length ? (
-        <Group title="Collections" note={`${collections.length} 个`} footer="全文库用于相似度与范例检索；维度库按维度保存已终审段落，评分时作为同维度参考。">
+        <Group title="Collections" note={`${collections.length} 个`} footer="全文库用于相似度与范例检索；维度库按维度保存已终审内容，评分时作为同维度参考。">
           {collections.map((item) => (
             <ListRow
               key={item.name}
@@ -71,6 +102,23 @@ function VectorList() {
           ))}
         </Group>
       ) : null}
+
+      <Sheet
+        open={confirming}
+        title="清空当前向量库？"
+        text="会删除当前课程的全部 collection，包括全文库与各维度库。评分结果、报告文件和细则不受影响，但相似度、范例检索和维度历史参考会从零开始。"
+        onClose={() => (clearing ? null : setConfirming(false))}
+        footer={
+          <>
+            <Button onClick={() => setConfirming(false)} disabled={clearing}>取消</Button>
+            <Button variant="destructive" loading={clearing} onClick={clearAll}>确认清空</Button>
+          </>
+        }
+      >
+        <Banner tone="danger" icon="alert">
+          当前共 {collections.length} 个 collection、{fmtCount(itemCount)} 条数据。清空后无法从页面恢复。
+        </Banner>
+      </Sheet>
     </>
   );
 }
@@ -156,7 +204,7 @@ function VectorDetail({ name }) {
             footer="正文最多展示前 4000 字符；向量只展示前 8 维，完整向量保留在库内。"
           >
             {!items.length ? (
-              <Empty icon="database" title="这个 collection 还没有数据" text="评分或终审后会自动写入。" />
+              <Empty icon="database" title="这个 collection 还没有数据" text="该维度还没有终审内容，终审后才会写入。" />
             ) : (
               items.map((item) => (
                 <Disclosure
