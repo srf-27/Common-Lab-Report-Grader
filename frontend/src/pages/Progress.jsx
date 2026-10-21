@@ -88,9 +88,9 @@ export default function GradingProgress() {
                   ? "评分出错"
                   : "正在评分"
           }
-          note={status.message || ""}
+          note={status.message || (status.workers > 1 ? `并发 ${status.workers} 路` : "")}
           actions={<Badge tone={status.phase === "done" ? "ok" : status.phase === "error" ? "danger" : ""}>{done}/{total || "—"}</Badge>}
-          footer="单份报告通常需要 10–40 秒；模型失败的报告会标为「模型失败」并可单独重评，不会伪造分数。"
+          footer="默认 3 路并行，单份通常 10–40 秒；模型失败的报告会标为「模型失败」并可单独重评，不会伪造分数。"
         >
           <div className="list-row" style={{ display: "block", paddingTop: 16, paddingBottom: 16 }}>
             <Progress value={percent} tone={status.phase === "error" ? "danger" : undefined} />
@@ -105,7 +105,7 @@ export default function GradingProgress() {
                 </div>
                 <div className="t-footnote c-secondary" style={{ marginTop: 2 }}>
                   {running
-                    ? `第 ${Math.min(done + 1, total)} 份 / 共 ${total} 份`
+                    ? `已完成 ${done} 份 / 共 ${total} 份`
                     : `已处理 ${done} 份`}
                 </div>
               </div>

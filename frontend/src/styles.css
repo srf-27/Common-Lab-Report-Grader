@@ -3118,3 +3118,27 @@ button:disabled {
     display: none;
   }
 }
+
+/* 向量库：元数据 / 向量预览的等宽块 */
+.vector-meta {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--fill);
+  color: var(--label-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.vector-inline {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--label-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

@@ -80,8 +80,8 @@ frontend/
     │   ├── hooks.js         useData / usePoll / useMedia 等
     │   ├── store.jsx        课程会话与 bootstrap 上下文
     │   └── markdown.jsx     Markdown + 表格 + KaTeX 公式
-    └── pages/               12 个页面：Workbench、Rubric、Reports、ReportDetail、Select、
-                             Progress、Results、Roster、Calibration、Settings、Mcp、Usage
+    └── pages/               13 个页面：Workbench、Rubric、Reports、ReportDetail、Select、
+                             Progress、Results、Roster、Calibration、Settings、Mcp、Usage、VectorStore
 ```
 
 写操作复用 Flask 的表单端点（`/upload_criteria`、`/start_grading`、`/update_scores` 等），
@@ -99,7 +99,7 @@ frontend/
         ├─ reports/<stem>/meta.json      页数、图片数、学生信息、提取时间
         └─ 同文本哈希去重（保留先上传者）
 
-评分 ──(start_grading)──> 线程逐份 _grade_one
+评分 ──(start_grading)──> 线程池并行 _grade_one（默认 3 路，ERG_GRADING_WORKERS 可调）
         ├─ 图片/段落一次性 assign_items → text_assignments / image_assignments
         ├─ Grader.grade_single
         │   ├─ detect_injection  → 命中：flagged_injection（不评分）

@@ -35,6 +35,16 @@ const emptyCriterion = () => ({
 const metric = (value) =>
   typeof value === "number" && !Number.isNaN(value) ? value.toFixed(3) : "—";
 
+const missingFields = (item) => {
+  const fields = [];
+  if (!Number(item.weight)) fields.push("weight");
+  if (!String(item.doc_ref || "").trim()) fields.push("doc_ref");
+  LEVELS.forEach((level) => {
+    if (!String(item.levels?.[level] || "").trim()) fields.push(level);
+  });
+  return fields;
+};
+
 export default function Rubric() {
   const { data, error, loading, load } = useData("/api/rubric");
   const { data: pilotData, load: loadPilot } = useData("/api/pilot");
@@ -323,32 +333,45 @@ export default function Rubric() {
 
   const fillCell = async (index) => {
     const item = draft[index];
-    const fields = [];
-    if (!Number(item.weight)) fields.push("weight");
-    if (!String(item.doc_ref || "").trim()) fields.push("doc_ref");
-    LEVELS.forEach((level) => {
-      if (!String(item.levels?.[level] || "").trim()) fields.push(level);
-    });
+    const fields = missingFields(item);
     if (!fields.length) return toast("该维度的字段已经完整");
     setGenIndex(index);
     try {
+      const requested = new Set(fields);
       const filled = await postJSON("/rubric_gen_cell", {
         name: item.name,
         fields,
-        context: { weight: item.weight, doc_ref: item.doc_ref },
+        context: {
+          weight: item.weight,
+          doc_ref: item.doc_ref,
+          levels: item.levels || {},
+          non_report: Boolean(item.non_report),
+          excluded: Boolean(item.excluded),
+        },
       });
       const changes = {};
-      if (filled.weight !== undefined) changes.weight = filled.weight;
-      if (filled.doc_ref !== undefined) changes.doc_ref = filled.doc_ref;
+      if (requested.has("weight") && filled.weight !== undefined) changes.weight = filled.weight;
+      if (requested.has("doc_ref") && filled.doc_ref !== undefined) changes.doc_ref = filled.doc_ref;
       // 后端按 CELL_PROMPT 返回 {"levels": {"A": ...}}，兼容旧的扁平结构
       const incoming = filled.levels && typeof filled.levels === "object" ? filled.levels : filled;
       const levels = { ...item.levels };
       LEVELS.forEach((level) => {
-        if (incoming[level]) levels[level] = incoming[level];
+        if (requested.has(level) && String(incoming[level] || "").trim()) {
+          levels[level] = incoming[level];
+        }
       });
       changes.levels = levels;
       patch(index, changes);
-      toast("已补全该维度，记得保存", "ok");
+      const missing = fields.filter((field) => {
+        if (field === "weight") return !Number(changes.weight ?? item.weight);
+        if (field === "doc_ref") return !String(changes.doc_ref ?? item.doc_ref).trim();
+        return !String(levels[field] || "").trim();
+      });
+      if (missing.length) {
+        toast(`模型未补全：${missing.join("、")}`, "danger");
+      } else {
+        toast("已补全该维度，记得保存", "ok");
+      }
     } catch (err) {
       toast(errorText(err), "danger");
     } finally {
@@ -586,7 +609,12 @@ export default function Rubric() {
                     size="sm"
                     icon="refresh"
                     loading={genIndex === index}
-                    disabled={genIndex >= 0}
+                    disabled={genIndex >= 0 || missingFields(item).length === 0}
+                    title={
+                      missingFields(item).length
+                        ? "补全空着的字段"
+                        : "所有字段已完整，不需要补全"
+                    }
                     onClick={() => fillCell(index)}
                   >
                     补全

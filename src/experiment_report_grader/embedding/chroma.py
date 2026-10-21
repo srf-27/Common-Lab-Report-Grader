@@ -7,7 +7,7 @@ from .base import VectorStoreBase
 class Chroma(VectorStoreBase):
     """Chroma 向量库：本地持久化（local）或远端 Chroma Server（cloud）。"""
 
-    def __init__(self, config=None, session_dir=None):
+    def __init__(self, config=None, session_dir=None, create=True):
         from . import create_embedding_function  # 包级工厂，避免与 __init__ 循环导入
         config = config or {}
         cfg = config.get("chroma") or {}
@@ -22,9 +22,17 @@ class Chroma(VectorStoreBase):
             os.makedirs(db_path, exist_ok=True)
             self.client = self.local(db_path)
             name = "grading_cases"
-        self.collection = self.client.get_or_create_collection(
-            name=name, metadata={"hnsw:space": "cosine"},
-            embedding_function=embedding_function)
+        if create:
+            self.collection = self.client.get_or_create_collection(
+                name=name, metadata={"hnsw:space": "cosine"},
+                embedding_function=embedding_function)
+        else:
+            # 只读管理页：不要因为打开页面就创建空 collection
+            try:
+                self.collection = self.client.get_collection(
+                    name=name, embedding_function=embedding_function)
+            except Exception:
+                self.collection = None
 
     @classmethod
     def local(cls, path):

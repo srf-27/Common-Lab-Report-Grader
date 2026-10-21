@@ -47,7 +47,7 @@ export default function Workbench() {
     <>
       <PageHead
         title="工作台"
-        sub={`${boot.session.name} · 按 1 → 2 → 3 顺序准备数据，按钮随数据齐备自动启用。`}
+        sub={`${boot.session.name} · 按 1 → 5 步顺序准备数据，按钮随数据齐备自动启用。`}
         actions={
           <>
             <LinkButton to="/app/rubric" variant="tinted" icon="rubric">
