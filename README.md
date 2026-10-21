@@ -46,6 +46,7 @@
 - **非报告维度**：预习、课堂、操作等全部保留但默认停用，权重不动、导出留空列；可上传成绩单补分。
 - **报告表格**：DOCX/PDF 提取出的 Markdown 表格现在会还原成表格，不再显示成一堆竖线。
 - **上传框**：支持拖拽，边框与留白重做；报告与标准各自独立，不再串任务。
+- **经典版退役**：Jinja 模板与旧样式全部删除，`/classic`、`/rubric_review` 等历史路径 302 到对应的 SPA 页面。
 
 ---
 
@@ -134,7 +135,8 @@ cd ..
 
 成功的话最后会打印类似 `✓ built in 1.5s`，并生成 `src/experiment_report_grader/static/ui/`。
 
-> `npm install` 慢或超时，先换国内镜像：`npm config set registry https://registry.npmmirror.com`。>   
+> `npm install` 慢或超时，先换国内镜像：`npm config set registry https://registry.npmmirror.com`。
+>
 > 如果 `npm` 命令不存在，说明 Node.js 没装好，去 [nodejs.org](https://nodejs.org/) 装 LTS 版。
 
 ### 3. 配置模型
@@ -400,10 +402,9 @@ src/experiment_report_grader/
     external_scores.py      课外维度成绩单：解析结果、按学号合并、重算小计
   utils/                    模型客户端、文档解析、OCR、注入检测、内容安全、隐私脱敏
   mcp/                      MCP 客户端（stdio / http JSON-RPC）与插件注册表
-  templates/                Jinja2 老版页面（15 个，`/classic` 回退）
   static/                   前端构建产物、KaTeX、favicon
 frontend/                   React 19 + Vite 6 的 SPA（无组件库）
-  src/pages/                11 个页面，一页一文件
+  src/pages/                12 个页面，一页一文件
   src/ui/                   按钮、分组列表、sheet、等级选择器等基础件
   src/lib/                  请求、路由、数据钩子、上下文、Markdown/公式
   src/styles.css            设计令牌与全部样式

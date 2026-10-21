@@ -2,6 +2,9 @@
 
 > **状态：旧版存档。** HeroUI / Tailwind / framer-motion 已从依赖中移除，当前前端为纯 CSS 令牌 + 自写组件；本文仅保留作迁移记录。
 
+> 2026-10-21 更新：Jinja 经典版已整体删除，本文涉及 `/classic`、`templates/`、mammoth 的内容仅作历史记录。
+
+
 现状：**前端已整站迁移为 React SPA**（React 19 + HeroUI 2.8 + Tailwind 3.4 + Vite 6），Flask 仅提供 JSON API 与文件下载；Jinja 版页面保留在 `/classic` 及原有路径，作为回退。
 
 ```
