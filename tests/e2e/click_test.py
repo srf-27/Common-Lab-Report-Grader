@@ -34,6 +34,7 @@ PAGES = [
     ("/app/calibration", "评分校准"),
     ("/app/mcp", "插件"),
     ("/app/usage", "用量统计"),
+    ("/app/vector", "向量库"),
     ("/app/settings", "配置"),
 ]
 
