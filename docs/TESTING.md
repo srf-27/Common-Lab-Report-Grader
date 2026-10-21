@@ -10,7 +10,7 @@ python scripts/ocr_check.py        # OCR 准确性自检（合成图）
 
 `tests/run_all.py` 会加载 `tests/unit/test_*.py` 与 `tests/integration/test_*.py`，执行其中所有 `test_*` 函数并汇总。假模型在 `tests/fake_llm.py`，通过改写 `experiment_report_grader.factory._make` 注入，不产生真实 API 费用。
 
-## 2. 用例矩阵（74 项）
+## 2. 用例矩阵（79 项）
 
 | 模块 | 项数 | 覆盖点 |
 |---|---|---|

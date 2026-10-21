@@ -14,7 +14,7 @@ import yaml
 from urllib.parse import quote
 from flask import Flask, jsonify, redirect, request, send_file
 
-from .embedding import Chroma
+from .embedding import Chroma, create_embedding_function
 from .factory import llm
 from .mcp import client as mcp_client
 from .mcp import store as mcp_store
@@ -359,6 +359,33 @@ def process_criteria():
     return redirect("/app/workbench")
 
 
+def _sync_dimension_collections(names):
+    """只在 rubric 确认时调用：补齐当前维度的 collection，删掉已移除维度的旧 collection。"""
+    keep = {str(name) for name in names if str(name).strip()}
+    try:
+        vector_cfg = (state.get("config") or {}).get("vector_store") or {}
+        store = Chroma(config=vector_cfg, session_dir=session_dir(), create=False)
+        existing = set()
+        for collection in store.client.list_collections():
+            if not collection.name.startswith("dim_"):
+                continue
+            dimension = (collection.metadata or {}).get("dimension")
+            if not dimension:
+                continue
+            if dimension not in keep:
+                store.client.delete_collection(collection.name)
+            else:
+                existing.add(dimension)
+        embedding_function = create_embedding_function(vector_cfg.get("embedding"))
+        for dimension in keep - existing:
+            store.client.get_or_create_collection(
+                name="dim_" + hashlib.sha1(dimension.encode("utf-8")).hexdigest()[:12],
+                metadata={"hnsw:space": "cosine", "dimension": dimension},
+                embedding_function=embedding_function)
+    except Exception:
+        pass
+
+
 def _save_rubric(rubric_json, doc_text=None, experiment_text=None):
     path = os.path.join(session_sub("rubrics"), "rubric_current.json")
     rubric_io.save_rubric_json(rubric_json, path)
@@ -631,6 +658,7 @@ def pilot_confirm():
     data = _load_pilot()
     data["confirmed_at"] = time.time()
     data["rubric_hash"] = _rubric_hash()
+    _sync_dimension_collections([c["name"] for c in state["rubric_json"]["criteria"]])
     _save_pilot(data)
     return jsonify({"ok": True, "confirmed": True})
 
@@ -1874,6 +1902,23 @@ def api_vector_collection(name):
         })
     except Exception as exc:
         return jsonify({"error": f"读取 collection 失败：{exc}"}), 500
+
+
+@app.route("/api/vector/clear", methods=["POST"])
+def api_vector_clear():
+    if _busy():
+        return jsonify({"error": "有任务正在进行，请等评分/解析结束后再清空"}), 409
+    try:
+        store = Chroma(config=(state.get("config") or {}).get("vector_store") or {},
+                       session_dir=session_dir(), create=False)
+        names = [collection.name for collection in store.client.list_collections()]
+        for name in names:
+            store.client.delete_collection(name)
+        if state.get("grader"):
+            state["grader"].invalidate_vector_store()
+        return jsonify({"ok": True, "deleted": len(names)})
+    except Exception as exc:
+        return jsonify({"error": f"清空向量库失败：{exc}"}), 500
 
 
 def _collection_dimension(collection):
