@@ -110,6 +110,35 @@ def test_finalize_pushes_to_dimension_store():
         assert collection.count() == 1
 
 
+def test_dimension_reference_does_not_create_collection():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        g = _grader(tmp)
+        before = len(g.kb.client.list_collections())
+        assert g._dimension_references("还没确认的维度", "正文") == ""
+        assert len(g.kb.client.list_collections()) == before, "只读参考不能创建 collection"
+
+
+def test_dimension_store_one_vector_per_report_dimension():
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        g = _grader(tmp)
+        result = {
+            "report_id": "b.docx",
+            "_report_chunks": ["甲段", "乙段", "丙段"],
+            "text_assignments": {"p0": {"criterion": "误差分析"},
+                                 "p1": {"criterion": "误差分析"},
+                                 "p2": {"criterion": "误差分析"}},
+            "images": [],
+            "grading": {"scores": {"误差分析": {"level": "A", "evidence": "证据"}}},
+        }
+        g._remember_dimension_chunks(result)
+        collection = g._dimension_collection("误差分析")
+        assert collection.count() == 1, "同一学生同一维度只能有一条向量"
+        document = collection.get()["documents"][0]
+        assert "甲段" in document and "乙段" in document and "丙段" in document
+        g._remember_dimension_chunks(result)
+        assert collection.count() == 1, "重复终审应覆盖而不是追加"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

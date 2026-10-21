@@ -104,6 +104,8 @@ class Grader:
             self.parallel_checks = True
         self.session_scope = similarity_scope or "default"
         vector_cfg = self.config.get("vector_store") or {}
+        self._vector_cfg = vector_cfg
+        self._kb_session_dir = kb_session_dir
         self.kb = Chroma(config=vector_cfg, session_dir=kb_session_dir)  # 全文相似度库
         self.embedding_function = create_embedding_function(vector_cfg.get("embedding"))
         grading_cfg = self.config.get("grading") or {}
@@ -164,6 +166,18 @@ class Grader:
         return value
 
     # ---------- RAG ----------
+    def _ensure_kb(self):
+        if self.kb is None:
+            self.kb = Chroma(config=self._vector_cfg, session_dir=self._kb_session_dir)
+            self.dimension_collections = {}
+            self.remembered = None
+
+    def invalidate_vector_store(self):
+        """清空向量库后丢弃旧 collection 句柄，下次终审再按需重建。"""
+        self.kb = None
+        self.dimension_collections = {}
+        self.remembered = None
+
     def _query_vector(self, text):
         """同一份正文的 query embedding 只算一次，维度参考不再逐维重新嵌入。"""
         key = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -189,18 +203,27 @@ class Grader:
                 pass
         return collection.query(query_texts=[text], n_results=n_results)
 
-    def _dimension_collection(self, name):
-        """每个维度一个库：存该维度已终审的 chunk，评分时作 RAG 参考。"""
+    def _dimension_collection(self, name, create=True):
+        """每个维度一个库；create=False 只读，rubric 确认前不会凭空建库。"""
         with self._kb_lock:
-            if name not in self.dimension_collections:
-                key = "dim_" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
-                self.dimension_collections[name] = self.kb.client.get_or_create_collection(
-                    name=key, metadata={"hnsw:space": "cosine", "dimension": name},
-                    embedding_function=self.embedding_function)
+            if name in self.dimension_collections:
+                return self.dimension_collections[name]
+            key = "dim_" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
+            if not create:
+                try:
+                    return self.kb.client.get_collection(
+                        name=key, embedding_function=self.embedding_function)
+                except Exception:
+                    return None
+            self.dimension_collections[name] = self.kb.client.get_or_create_collection(
+                name=key, metadata={"hnsw:space": "cosine", "dimension": name},
+                embedding_function=self.embedding_function)
             return self.dimension_collections[name]
 
     def _dimension_references(self, name, text, n_results=2):
-        collection = self._dimension_collection(name)
+        collection = self._dimension_collection(name, create=False)
+        if collection is None:
+            return ""
         with self._kb_lock:
             total = collection.count()
             if total == 0 or not text.strip():
@@ -297,51 +320,62 @@ class Grader:
         return [anonymize_text(item, self.llm)[0] for item in items]  # 兜底：逐条
 
     def _remember_dimension_chunks(self, result):
-        """把已终审报告里挂到某维度的 chunk 与图片存进该维度库（批量脱敏，一次 LLM 调用）。"""
+        """每个学生每个维度只存一条记录：把挂到该维度的 chunk 合并成一个大块再嵌入。"""
         chunks = result.get("_report_chunks") or []
         assignments = result.get("text_assignments") or {}
         images = result.get("images") or []
         scores = (result.get("grading") or {}).get("scores") or {}
-        pending = []
+        groups = {}
         for chunk_id, assignment in assignments.items():
             criterion = (assignment or {}).get("criterion")
             index = int(chunk_id[1:]) if chunk_id.startswith("p") and chunk_id[1:].isdigit() else -1
             if not criterion or not 0 <= index < len(chunks):
                 continue
-            entry = scores.get(criterion) or {}
-            pending.append({"id": f"{result['report_id']}_{chunk_id}",
-                            "texts": [chunks[index], str(entry.get("evidence") or "")[:200]],
-                            "meta": {"report_id": result["report_id"], "dimension": criterion,
-                                     "level": entry.get("level", "")}})
+            group = groups.setdefault(criterion, {"chunks": [], "images": []})
+            if chunks[index].strip():
+                group["chunks"].append((index, chunks[index]))
         for filename, assignment in (result.get("image_assignments") or {}).items():
             criterion = (assignment or {}).get("criterion")
             image = next((im for im in images if im["filename"] == filename), None)
             if not criterion or image is None:
                 continue
+            groups.setdefault(criterion, {"chunks": [], "images": []})["images"].append(image)
+        entries = []
+        for criterion, group in groups.items():
+            parts = [text for _, text in sorted(group["chunks"], key=lambda item: item[0])]
+            parts += [f"[图] {image['filename']} {image.get('context') or ''}".strip()
+                      for image in group["images"]]
+            document = "\n\n".join(part for part in parts if str(part).strip())
+            if not document:
+                continue
             entry = scores.get(criterion) or {}
-            pending.append({"id": f"{result['report_id']}_img_{filename}",
-                            "texts": [f"[图] {filename} {image.get('context') or ''}".strip()],
-                            "meta": {"report_id": result["report_id"], "dimension": criterion,
-                                     "level": entry.get("level", ""), "kind": "image",
-                                     "filename": filename, "page": image.get("page", "")}})
-        if not pending:
+            entries.append({
+                "dimension": criterion,
+                "document": document,
+                "level": entry.get("level", ""),
+                "evidence": str(entry.get("evidence") or "")[:500],
+                "chunk_count": len(group["chunks"]),
+                "image_count": len(group["images"]),
+            })
+        if not entries:
             return 0
-        flat = [text for item in pending for text in item["texts"]]
-        scrubbed = self._anonymize_many(flat)
-        cursor = 0
-        for item in pending:
-            size = len(item["texts"])
-            texts = scrubbed[cursor:cursor + size]
-            cursor += size
-            meta = dict(item["meta"])
-            if "kind" in meta:
-                document = texts[0]
-            else:
-                document, evidence = texts[0], texts[1]
-                meta["evidence"] = evidence
-            self._dimension_collection(meta["dimension"]).add(
-                ids=[item["id"]], documents=[document], metadatas=[meta])
-        return len(pending)
+        scrubbed = self._anonymize_many([entry["document"] for entry in entries])
+        for entry, document in zip(entries, scrubbed):
+            metadata = {"report_id": result["report_id"], "dimension": entry["dimension"],
+                        "level": entry["level"], "evidence": entry["evidence"],
+                        "chunk_count": entry["chunk_count"], "image_count": entry["image_count"]}
+            collection = self._dimension_collection(entry["dimension"])
+            item_id = f"{result['report_id']}__dim_" + hashlib.sha1(
+                entry["dimension"].encode("utf-8")).hexdigest()[:10]
+            with self._kb_lock:
+                try:
+                    collection.delete(where={"$and": [{"report_id": result["report_id"]},
+                                                      {"dimension": entry["dimension"]}]})
+                except Exception:
+                    pass
+                # 同一维度的大块用同一个 id：重复终审时覆盖，不会越积越多
+                collection.upsert(ids=[item_id], documents=[document], metadatas=[metadata])
+        return len(entries)
 
     # ---------- 提示词组装 ----------
     def _criteria_block(self, criteria):
@@ -570,7 +604,8 @@ class Grader:
                                  "error": str(error)[:300], "graded_at": time.time()})
 
     def finalize_report(self, report_id, text=None):
-        """单份报告终审入 RAG：全文进全文库，维度 chunk 进对应维度库。"""
+        """单份报告终审入 RAG：全文进全文库，维度内容汇总进对应维度库。"""
+        self._ensure_kb()
         result = next((r for r in self.results if r["report_id"] == report_id), None)
         if result is None:
             return None
