@@ -10,8 +10,8 @@ import threading
 import time
 
 import yaml
-from flask import (Flask, jsonify, redirect, render_template, request, send_file,
-                   url_for)
+from urllib.parse import quote
+from flask import Flask, jsonify, redirect, request, send_file
 
 from .factory import llm
 from .mcp import client as mcp_client
@@ -43,9 +43,6 @@ STAGES = [
     ("review", "④ 待终审"),
     ("done", "⑤ 完成"),
 ]
-
-_NAV = (("/", "工作台"), ("/rubric_review", "评分细则"), ("/reports_list", "报告管理"),
-        ("/roster", "花名册"), ("/mcp", "插件"), ("/settings", "配置"))
 
 
 def _bootstrap():
@@ -161,51 +158,7 @@ def _busy():
     return task_running() or (state.get("grading_status") or {}).get("phase") == "running"
 
 
-# ---------------------------------------------------------------- 上下文
-def _asset_version():
-    path = os.path.join(os.path.dirname(__file__), "static", "css", "style.css")
-    try:
-        return str(int(os.path.getmtime(path)))
-    except OSError:
-        return "1"
-
-
-@app.context_processor
-def inject_globals():
-    idx = load_sessions()
-    current = next((s for s in idx["sessions"] if s["id"] == state.get("session")), {})
-    results = state["grader"].results if state.get("grader") else []
-    graded = {r["report_id"] for r in results if r.get("status") == "graded"}
-    ok_reports = [r for r in state.get("extracted_reports", []) if r.get("status") == "ok"]
-    graded_count = len(graded & {r["meta"]["filename"] for r in ok_reports})
-    stage_key, stage_label = _session_stage()
-    uploads = os.path.join(session_dir(), "uploads")
-    names = os.listdir(uploads) if os.path.isdir(uploads) else []
-    approved = _approved_ids()
-    return {
-        "rubric": state.get("rubric"),
-        "rubric_json": state.get("rubric_json"),
-        "reports_count": len(ok_reports),
-        "graded_count": graded_count,
-        "pending_count": len(ok_reports) - graded_count,
-        "approved_count": len(approved),
-        "counts_unapproved": len([r for r in results if r["report_id"] not in approved]),
-        "has_criteria_file": any(os.path.splitext(n)[1].lower() in (".docx", ".pdf", ".txt")
-                                 and not n.startswith("calibration_") for n in names),
-        "has_report_files": any(os.path.splitext(n)[1].lower() in
-                                (".pdf", ".docx", ".doc", ".md", ".zip", ".rar", ".7z")
-                                and not n.startswith("calibration_") for n in names),
-        "sessions": idx["sessions"],
-        "current_session": current,
-        "nav_items": _NAV,
-        "stage_key": stage_key,
-        "stage_label": stage_label,
-        "mcp_mounted": len((state.get("mcp") or {}).get("servers") or []),
-        "busy": _busy(),
-        "asset_v": _asset_version(),
-    }
-
-
+# ---------------- 会话阶段
 def _session_stage():
     """纯数据推导当前会话阶段，返回 (key, label)。"""
     if not state.get("rubric_json") and not state.get("rubric"):
@@ -232,7 +185,7 @@ def _session_stage():
 @app.route("/session/new", methods=["POST"])
 def session_new():
     hydrate_session(new_session(request.form.get("name", ""))["id"])
-    return redirect(url_for("index"))
+    return redirect("/app/workbench")
 
 
 @app.route("/session/switch", methods=["POST"])
@@ -243,14 +196,14 @@ def session_switch():
         idx["current"] = sid
         save_sessions(idx)
         hydrate_session(sid)
-    return redirect(request.form.get("next") or url_for("index"))
+    return redirect(request.form.get("next") or "/app/workbench")
 
 
 @app.route("/session/remove", methods=["POST"])
 def session_remove():
     entry = remove_session(request.form.get("session_id", ""))
     hydrate_session(entry["id"])
-    return redirect(url_for("index"))
+    return redirect("/app/workbench")
 
 
 # ---------------------------------------------------------------- HeroUI 预览（React islands）
@@ -298,11 +251,10 @@ def _bootstrap_payload():
     }
 
 
-# ---------------------------------------------------------------- 工作台（经典版，保留回退）
+# ---------------------------------------------------------------- 工作台（旧路径重定向到 SPA）
 @app.route("/classic")
 def index():
-    agreement = _agreement()
-    return render_template("index.html", task=state.get("task"), agreement=agreement)
+    return redirect("/app/workbench")
 
 
 def _agreement():
@@ -349,12 +301,12 @@ def process_criteria():
         candidates = [os.path.join(updir, n) for n in os.listdir(updir)
                       if os.path.splitext(n)[1].lower() in (".docx", ".pdf", ".txt")]
         if not candidates:
-            return redirect(url_for("index"))
+            return redirect("/app/workbench")
         filepath = max(candidates, key=os.path.getmtime)
         state["criteria_upload"] = filepath
     if _busy():
-        return redirect(url_for("task_page"))
-    task_start("criteria", url_for("rubric_review"))
+        return redirect("/app/workbench")
+    task_start("criteria", "/app/rubric")
     task_update(detail=f"已上传 {os.path.basename(filepath)}")
 
     def work():
@@ -402,7 +354,7 @@ def process_criteria():
             task_finish("cancelled" if task_cancelled() else "error", e)
 
     threading.Thread(target=work, daemon=True).start()
-    return redirect(url_for("task_page"))
+    return redirect("/app/workbench")
 
 
 def _save_rubric(rubric_json, doc_text=None, experiment_text=None):
@@ -610,7 +562,7 @@ def pilot_run():
         return jsonify({"error": "请先上传测试报告"}), 400
     if task_running():
         return jsonify({"error": "有任务正在进行，请稍候"}), 409
-    task_start("pilot", url_for("rubric_review"))
+    task_start("pilot", "/app/rubric")
 
     def work():
         try:
@@ -718,10 +670,10 @@ def api_pilot():
 def task_page():
     t = state.get("task")
     if not t:
-        return redirect(url_for("index"))
+        return redirect("/app/workbench")
     if t["status"] != "running":
-        return redirect(t.get("redirect") or url_for("index"))
-    return render_template("task_progress.html", task=t)
+        return redirect(t.get("redirect") or "/app/workbench")
+    return redirect("/app/workbench")
 
 
 @app.route("/task_status")
@@ -744,10 +696,7 @@ def task_cancel():
 
 @app.route("/rubric_review")
 def rubric_review():
-    return render_template("rubric_review.html", rubric_json=state.get("rubric_json"),
-                           warnings=state.get("rubric_warnings") or [],
-                           has_markdown=os.path.exists(os.path.join(
-                               session_dir(), "rubrics", "rubric_latest.md")))
+    return redirect("/app/rubric")
 
 
 @app.route("/rubric_gen_cell", methods=["POST"])
@@ -804,15 +753,13 @@ def calibrate_upload():
     if not report_file:
         return jsonify({"error": "未收到校准报告"}), 400
     if not state.get("rubric_json"):
-        return redirect(url_for("rubric_review"))
+        return redirect("/app/rubric")
     filepath = os.path.join(session_sub("uploads"),
                             "calibration_" + sanitize_filename(report_file.filename))
     report_file.save(filepath)
     extraction = ReportExtractor(session_sub("calibration"), state["config"])._process_single(filepath)
     if extraction.get("status") != "ok":
-        return render_template("rubric_review.html", rubric_json=state.get("rubric_json"),
-                               warnings=[], has_markdown=True,
-                               error=f"校准报告解析失败：{extraction.get('reason')}"), 400
+        return jsonify({"error": f"校准报告解析失败：{extraction.get('reason')}"}), 400
     text = _read_text(os.path.join(extraction["meta"]["output_dir"], "text.md"))
     chunks = _chunks(text)
     grader = Grader(state["rubric_json"], llm_client=llm(state["config"]), config=state["config"],
@@ -821,50 +768,17 @@ def calibrate_upload():
                                        for i, c in enumerate(chunks)], shots_query=text[:1500])
     state["calibration"] = {"text": text, "chunks": chunks, "assignments": assignments,
                             "filename": extraction["meta"].get("filename", report_file.filename)}
-    return redirect(url_for("calibrate_score"))
+    return redirect("/app/calibration")
 
 
 @app.route("/calibrate_score")
 def calibrate_score():
-    calib = state.get("calibration")
-    if not calib or not state.get("rubric_json"):
-        return redirect(url_for("rubric_review"))
-    rows = []
-    for c in state["rubric_json"]["criteria"]:
-        paras = [calib["chunks"][int(aid[1:])] for aid, a in calib["assignments"].items()
-                 if (a or {}).get("criterion") == c["name"] and aid[1:].isdigit()
-                 and int(aid[1:]) < len(calib["chunks"])]
-        rows.append({"criterion": c, "paragraphs": paras})
-    mounted = {aid for aid in calib["assignments"]}
-    rest = [p for i, p in enumerate(calib["chunks"]) if f"p{i}" not in mounted]
-    return render_template("calibrate_score.html", filename=calib["filename"],
-                           rows=rows, rest=rest)
+    return redirect("/app/calibration")
 
 
 @app.route("/rubric_calibrate", methods=["POST"])
 def rubric_calibrate():
-    calib = state.get("calibration")
-    if not calib:
-        return redirect(url_for("rubric_review"))
-    teacher = {}
-    for c in state.get("rubric_json", {}).get("criteria", []):
-        level = request.form.get(f"teacher_level::{c['name']}")
-        if level in VALID_LEVELS:
-            teacher[c["name"]] = {"level": level, "evidence": "",
-                                  "reasoning": request.form.get(f"teacher_reason::{c['name']}", "").strip()}
-    grader = Grader(state["rubric_json"], llm_client=llm(state["config"]), config=state["config"],
-                    similarity_scope=state.get("session"))
-    outcome = grader.grade_single("calibration", calib["text"], references=_mcp_references("校准"))
-    result = outcome["result"]
-    if result.get("status") != "graded":
-        return render_template("calibration_result.html", error=(
-            f"AI 评分未完成（{result.get('status')}）："
-            f"{(result.get('injection_details') or {}).get('evidence') or result.get('error') or ''}"),
-            ai_grading=None, analysis=None), 200
-    analysis = RubricGenerator(llm_client=llm(state["config"])).calibrate(
-        state.get("rubric", ""), calib["text"], teacher, result["grading"])
-    return render_template("calibration_result.html", error="", ai_grading=result["grading"],
-                           analysis=analysis, result=result)
+    return redirect("/app/calibration")
 
 
 # ---------------------------------------------------------------- 报告
@@ -888,10 +802,10 @@ def upload_reports():
 @app.route("/process_reports", methods=["POST"])
 def process_reports():
     if (state.get("grading_status") or {}).get("phase") == "running":
-        return redirect(url_for("grading_progress"))
+        return redirect("/app/results")
     if task_running():
-        return redirect(url_for("task_page"))
-    task_start("reports", url_for("reports_list"))
+        return redirect("/app/workbench")
+    task_start("reports", "/app/reports")
 
     def work():
         try:
@@ -954,7 +868,7 @@ def process_reports():
             task_finish("cancelled" if task_cancelled() else "error", e)
 
     threading.Thread(target=work, daemon=True).start()
-    return redirect(url_for("task_page"))
+    return redirect("/app/workbench")
 
 
 def _save_meta(entry):
@@ -1022,16 +936,7 @@ def _discard_report(entry, upload_dir):
 
 @app.route("/reports_list")
 def reports_list():
-    graded = _graded_ids()
-    reports = []
-    for r in state["extracted_reports"]:
-        if r.get("status") != "ok":
-            continue
-        fn = r["meta"]["filename"]
-        reports.append({**r, "graded": fn in graded, "approved": fn in _approved_ids(),
-                        "has_original": _origin_path(fn) is not None})
-    return render_template("reports_list.html", reports=reports, downloads=_download_paths(),
-                           stu_fields=_student_fields())
+    return redirect("/app/reports")
 
 
 @app.route("/report_text/<path:filename>")
@@ -1097,15 +1002,7 @@ def report_detail(filename):
     entry = _find_entry(filename)
     if not entry or entry.get("status") != "ok":
         return "报告不存在", 404
-    text = _report_text(entry)
-    result = next((r for r in (state["grader"].results if state["grader"] else [])
-                   if r["report_id"] == filename), None)
-    rubric_json = state.get("rubric_json") or _coerce_rubric(state.get("rubric") or "")
-    return render_template("report_detail.html", filename=filename, entry=entry,
-                           blocks=_build_dim_blocks(rubric_json, text, result,
-                                                    entry.get("images") or ()), result=result,
-                           student=entry["meta"].get("student") or {}, stu_fields=_student_fields(),
-                           has_original=_origin_path(filename) is not None)
+    return redirect(f"/app/report/{quote(filename, safe='/')}")
 
 
 @app.route("/report_image/<path:filename>/<path:imgname>")
@@ -1131,7 +1028,7 @@ def update_student(filename):
     entry["meta"]["student"] = student
     _save_meta(entry)
     _export_all()
-    return redirect(request.form.get("next") or url_for("reports_list"))
+    return redirect(request.form.get("next") or "/app/reports")
 
 
 # ---------------------------------------------------------------- 学生信息与花名册
@@ -1211,13 +1108,7 @@ def _export_flagged(suspicious):
 
 @app.route("/roster")
 def roster_page():
-    roster = load_roster()
-    _, suspicious, missing = _classify_students()
-    report_count = len([r for r in state["extracted_reports"] if r.get("status") == "ok"])
-    mostly_unmatched = bool(roster and report_count and len(suspicious) * 2 >= report_count)
-    return render_template("roster.html", roster=roster, report_count=report_count,
-                           suspicious=suspicious, missing=missing,
-                           mostly_unmatched=mostly_unmatched)
+    return redirect("/app/roster")
 
 
 @app.route("/roster/upload", methods=["POST"])
@@ -1243,7 +1134,7 @@ def roster_upload():
              for i in range(min(len(headers), len(c)))}
             for c in grid[1:] if any(x not in (None, "") for x in c)]
     save_roster({"headers": headers, "rows": rows})
-    return redirect(url_for("roster_page"))
+    return redirect("/app/roster")
 
 
 @app.route("/roster/save", methods=["POST"])
@@ -1258,7 +1149,7 @@ def roster_save():
     except (ValueError, AttributeError):
         return jsonify({"error": "数据格式错误"}), 400
     save_roster({"headers": headers, "rows": rows})
-    return redirect(url_for("roster_page"))
+    return redirect("/app/roster")
 
 
 # ---------------------------------------------------------------- MCP 插件
@@ -1274,12 +1165,7 @@ def _mcp_references(query):
 
 @app.route("/mcp")
 def mcp_page():
-    servers = mcp_store.load_servers()
-    mount = state.get("mcp") or load_mcp_mount()
-    return render_template("mcp.html", servers=servers, mount=mount,
-                           status=state.get("mcp_status") or [],
-                           error=request.args.get("error", ""),
-                           referenced=(state.get("mcp_refs") or "")[:4000])
+    return redirect("/app/mcp")
 
 
 @app.route("/mcp/add", methods=["POST"])
@@ -1287,9 +1173,9 @@ def mcp_add():
     try:
         cfg = mcp_store.parse_form(request.form)
     except ValueError as e:
-        return redirect(url_for("mcp_page", error=str(e)))
+        return redirect("/app/mcp")
     mcp_store.upsert(request.form.get("name", "").strip(), cfg)
-    return redirect(url_for("mcp_page"))
+    return redirect("/app/mcp")
 
 
 @app.route("/mcp/remove", methods=["POST"])
@@ -1299,7 +1185,7 @@ def mcp_remove():
     mount = state.get("mcp") or {}
     mount["servers"] = [s for s in mount.get("servers") or [] if s != name]
     save_mcp_mount(mount)
-    return redirect(url_for("mcp_page"))
+    return redirect("/app/mcp")
 
 
 @app.route("/mcp/mount", methods=["POST"])
@@ -1312,7 +1198,7 @@ def mcp_mount():
         "max_chars": max(200, min(20000, int(request.form.get("max_chars") or 4000))),
     }
     save_mcp_mount(mount)
-    return redirect(url_for("mcp_page"))
+    return redirect("/app/mcp")
 
 
 @app.route("/mcp/test/<name>")
@@ -1330,7 +1216,7 @@ def mcp_test(name):
 def mcp_refresh():
     query = " ".join(c["name"] for c in (state.get("rubric_json") or {}).get("criteria", [])) or "实验报告"
     state["mcp_refs"] = _mcp_references(query)
-    return redirect(url_for("mcp_page"))
+    return redirect("/app/mcp")
 
 
 # ---------------------------------------------------------------- 评分
@@ -1504,7 +1390,7 @@ def _select_context(error=None):
 
 @app.route("/grading_select")
 def grading_select():
-    return render_template("grading_select.html", **_select_context())
+    return redirect("/app/select")
 
 
 @app.route("/start_grading", methods=["POST"])
@@ -1522,7 +1408,7 @@ def start_grading():
             if wants_json:
                 return jsonify({"ok": True, "started": 0, "running": True,
                                 "message": "已有评分任务在跑，正在查看进度"})
-            return redirect(url_for("grading_progress"))
+            return redirect("/app/results")
         selected = set(request.form.getlist("report_ids"))
         approved = _approved_ids()
         targets = [r for r in state["extracted_reports"]
@@ -1532,7 +1418,7 @@ def start_grading():
             if wants_json:
                 return jsonify({"ok": False, "started": 0,
                                 "message": "没有可评的报告（可能已终审或已被移除）"})
-            return redirect(url_for("grading_select"))
+            return redirect("/app/select")
         roster = load_roster()
         seen, conflict = {}, None
         for entry in targets:
@@ -1546,7 +1432,7 @@ def start_grading():
         if conflict:
             if wants_json:
                 return jsonify({"ok": False, "started": 0, "message": conflict})
-            return render_template("grading_select.html", **_select_context(error=conflict))
+            return redirect("/app/select")
         prev_results = state["grader"].results if state["grader"] else []
         state["grader"] = Grader(state["rubric_json"] or state["rubric"],
                                  llm_client=llm(state["config"]), config=state["config"],
@@ -1559,12 +1445,12 @@ def start_grading():
     if wants_json:
         return jsonify({"ok": True, "started": len(targets),
                         "files": [t["meta"]["filename"] for t in targets]})
-    return redirect(url_for("grading_progress"))
+    return redirect("/app/results")
 
 
 @app.route("/grading_progress")
 def grading_progress():
-    return render_template("grading_progress.html", status=state.get("grading_status") or {})
+    return redirect("/app/results")
 
 
 @app.route("/grading_status")
@@ -1586,7 +1472,7 @@ def regrade(filename):
         return jsonify({"error": "尚未评分"}), 400
     with state["grading_lock"]:
         if (state.get("grading_status") or {}).get("phase") == "running":
-            return redirect(url_for("grading_progress"))
+            return redirect("/app/results")
         entry = _find_entry(filename)
         if not entry:
             return jsonify({"error": "报告不存在"}), 404
@@ -1599,7 +1485,7 @@ def regrade(filename):
         save_approved(state["approved_ids"])
         state["grading_status"] = {"phase": "running", "done": 0, "total": 1, "current": filename}
         _spawn_grading(lambda: [entry])
-    return redirect(url_for("grading_progress"))
+    return redirect("/app/results")
 
 
 def _apply_teacher_levels(result, form, level_prefix, reason_prefix=""):
@@ -1637,7 +1523,7 @@ def update_scores():
         if result["report_id"] == report_id:
             _apply_teacher_levels(result, request.form, "level::", "reason::")
     _export_all()
-    return redirect(request.form.get("next") or url_for("grading_done"))
+    return redirect(request.form.get("next") or "/app/results")
 
 
 @app.route("/approve_report/<path:filename>", methods=["POST"])
@@ -1646,7 +1532,7 @@ def approve_report(filename):
     if not grader:
         return jsonify({"error": "尚无评分结果"}), 400
     if filename in _approved_ids():
-        return redirect(request.form.get("next") or url_for("grading_done"))
+        return redirect(request.form.get("next") or "/app/results")
     if (state.get("grading_status") or {}).get("phase") == "running":
         return jsonify({"error": "评分进行中，请等待完成后再终审"}), 400
     result = next((r for r in grader.results
@@ -1663,32 +1549,12 @@ def approve_report(filename):
     state["approved_ids"] = _approved_ids() | {filename}
     save_approved(state["approved_ids"])
     _export_all()
-    return redirect(request.form.get("next") or url_for("grading_done"))
+    return redirect(request.form.get("next") or "/app/results")
 
 
 @app.route("/grading_done")
 def grading_done():
-    results = state["grader"].results if state["grader"] else []
-    approved = _approved_ids()
-    running = (state.get("grading_status") or {}).get("phase") == "running"
-    students, suspicious, missing = _classify_students()
-    counts = {
-        "all": len(results),
-        "graded": len([r for r in results if r.get("status") == "graded"]),
-        "injection": len([r for r in results if r.get("status") == "flagged_injection"]),
-        "blocked": len([r for r in results if r.get("status") == "blocked_safety"]),
-        "failed": len([r for r in results if r.get("status") in ("llm_failed", "detection_failed",
-                                                                 "audit_truncated")]),
-        "plagiarism": len([r for r in results if r.get("similarity_warnings")]),
-        "unapproved": len([r for r in results if r["report_id"] not in approved]),
-    }
-    return render_template("grading_done.html", results=results, counts=counts,
-                           approved_ids=approved, students=students, suspicious=suspicious,
-                           suspicious_count=len(suspicious), stu_fields=_student_fields(),
-                           stale_ids={r["report_id"] for r in results if _result_stale(r)},
-                           running=running, downloads=_download_paths(),
-                           agreement=_agreement(), has_reports=bool(state["extracted_reports"]))
-
+    return redirect("/app/results")
 
 # ---------------------------------------------------------------- 配置
 @app.route("/settings", methods=["GET", "POST"])
@@ -1722,8 +1588,7 @@ def settings():
     emb["openai"].setdefault("api_key", "")
     emb["openai"].setdefault("model", "")
     if request.method == "GET":
-        return render_template("settings.html", cfg=cfg, saved=False, ocr_check=None,
-                               backend_label=BACKENDS.get(llm_cfg["backend"], "OpenAI 兼容接口"))
+        return redirect("/app/settings")
     form = request.form
     backend = form.get("llm_backend", llm_cfg.get("backend", "openai"))
     if backend in BACKENDS:
@@ -1764,8 +1629,7 @@ def settings():
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
     state["config"] = cfg
-    return render_template("settings.html", cfg=cfg, saved=True, ocr_check=None,
-                           backend_label=BACKENDS.get(cfg["llm"]["backend"], "OpenAI 兼容接口"))
+    return jsonify({"ok": True})
 
 
 BACKENDS = {"openai": "OpenAI 兼容接口", "ollama": "Ollama（本地）", "custom": "自定义 HTTP"}
@@ -1814,7 +1678,8 @@ def _api_criteria_uploaded(names):
 def spa_home():
     index = os.path.join(UI_DIST, "index.html")
     if not os.path.exists(index):
-        return redirect(url_for("index"))
+        return ("前端尚未构建：请执行 cd frontend && npm install && npm run build", 503,
+                {"Content-Type": "text/plain; charset=utf-8"})
     return send_file(index)
 
 
@@ -1823,7 +1688,8 @@ def spa_home():
 def spa(sub=None):
     index = os.path.join(UI_DIST, "index.html")
     if not os.path.exists(index):
-        return render_template("ui_missing.html"), 503
+        return ("前端尚未构建：请执行 cd frontend && npm install && npm run build", 503,
+                {"Content-Type": "text/plain; charset=utf-8"})
     return send_file(index)
 
 
