@@ -178,14 +178,61 @@ class RubricGenerator:
                     "message": f"未纳入评分：{(item or {}).get('reason') or '报告中缺少对应证据'}"})
         return result
 
+    @staticmethod
+    def _cell_value(filled, field):
+        if field in ("weight", "doc_ref"):
+            return filled.get(field)
+        levels = filled.get("levels") if isinstance(filled.get("levels"), dict) else {}
+        return levels.get(field, filled.get(field))
+
+    def _missing_cell_fields(self, filled, fields):
+        missing = []
+        for field in fields:
+            value = self._cell_value(filled, field)
+            if field == "weight":
+                try:
+                    if float(value) <= 0:
+                        missing.append(field)
+                        continue
+                except (TypeError, ValueError):
+                    missing.append(field)
+                    continue
+                continue
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing.append(field)
+        return missing
+
+    @staticmethod
+    def _merge_cell(filled, extra):
+        for key in ("weight", "doc_ref"):
+            value = extra.get(key)
+            if value is not None and str(value).strip():
+                filled[key] = value
+        extra_levels = extra.get("levels") if isinstance(extra.get("levels"), dict) else {}
+        for level in "ABCDE":
+            value = extra_levels.get(level, extra.get(level))
+            if value is not None and str(value).strip():
+                filled.setdefault("levels", {})[level] = value
+        return filled
+
     def generate_cells(self, criteria_doc, name, context, fields):
         maybe = {"name": name, "weight": 0, "doc_ref": "", "levels": {}, "rules": None}
-        filled = self._ask(CELL_PROMPT.format(
+        prompt = CELL_PROMPT.format(
             doc=criteria_doc, name=name,
             context=json.dumps({**maybe, **(context or {})}, ensure_ascii=False),
-            fields=", ".join(fields)))
+            fields=", ".join(fields))
+        filled = self._ask(prompt)
         if not filled:
             raise ValueError("模型未返回可解析的 JSON，请重试")
+        missing = self._missing_cell_fields(filled, fields)
+        if missing:
+            # 保存过空值的字段必须补上，不能因为上下文里是空字符串就跳过
+            retry = self._ask(prompt + "\n\n## 上次输出缺少的字段\n"
+                              + "、".join(missing) + "\n这些字段必须给出非空内容，不得省略。")
+            filled = self._merge_cell(filled, retry or {})
+            missing = self._missing_cell_fields(filled, fields)
+        if missing:
+            raise ValueError(f"模型未补全字段：{'、'.join(missing)}，请重试")
         return filled
 
     def validate_deviation(self, criteria_doc, rubric):

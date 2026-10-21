@@ -336,5 +336,13 @@ def test_spa_api_surface():
     settings = client.get("/api/settings").get_json()
     assert "llm" in settings and "vectorStore" in settings
 
+    vector = client.get("/api/vector").get_json()
+    assert "collections" in vector and vector.get("total") == len(vector["collections"])
+    if vector["collections"]:
+        detail = client.get("/api/vector/" + vector["collections"][0]["name"]).get_json()
+        for key in ("name", "total", "items", "dimension", "metadata"):
+            assert key in detail
+    assert client.get("/api/vector/not_a_collection").status_code == 404
+
     mcp = client.get("/api/mcp").get_json()
     assert "servers" in mcp and "mount" in mcp

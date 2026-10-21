@@ -14,6 +14,7 @@ import Roster from "./pages/Roster";
 import Calibration from "./pages/Calibration";
 import Mcp from "./pages/Mcp";
 import Usage from "./pages/Usage";
+import VectorStore from "./pages/VectorStore";
 import Settings from "./pages/Settings";
 
 const GROUPS = [
@@ -33,6 +34,7 @@ const GROUPS = [
       { to: "/app/calibration", label: "评分校准", icon: "calibration" },
       { to: "/app/mcp", label: "插件", icon: "mcp", count: (b) => b.mcp.mounted },
       { to: "/app/usage", label: "用量统计", icon: "usage" },
+      { to: "/app/vector", label: "向量库", icon: "database" },
       { to: "/app/settings", label: "配置", icon: "settings" },
     ],
   },
@@ -62,6 +64,7 @@ const TITLES = {
   "/app/calibration": "评分校准",
   "/app/mcp": "插件",
   "/app/usage": "用量统计",
+  "/app/vector": "向量库",
   "/app/settings": "配置",
 };
 
@@ -76,10 +79,20 @@ const ROUTES = {
   "/app/calibration": Calibration,
   "/app/mcp": Mcp,
   "/app/usage": Usage,
+  "/app/vector": VectorStore,
   "/app/settings": Settings,
 };
 
 function resolve(path) {
+  if (path.startsWith("/app/vector/")) {
+    const name = decodeURIComponent(path.slice("/app/vector/".length));
+    return {
+      Component: VectorStore,
+      props: { name },
+      title: "向量库详情",
+      back: { to: "/app/vector", label: "向量库" },
+    };
+  }
   if (path.startsWith("/app/report/")) {
     return {
       Component: ReportDetail,

@@ -8,11 +8,13 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 import yaml
 from urllib.parse import quote
 from flask import Flask, jsonify, redirect, request, send_file
 
+from .embedding import Chroma
 from .factory import llm
 from .mcp import client as mcp_client
 from .mcp import store as mcp_store
@@ -1273,15 +1275,54 @@ def _grade_one(grader, entry, references=""):
         image_entries = _image_entries(entry)
         chunks = _chunks(text)
         chunk_entries = [{"id": f"p{i}", "text": c[:300]} for i, c in enumerate(chunks)]
-        assignments = grader.assign_items(image_entries + chunk_entries, shots_query=text[:1500])
-        text_assignments = {k: v for k, v in assignments.items() if k.startswith("p")}
-        image_assignments = {k: v for k, v in assignments.items() if not k.startswith("p")}
-
         corrections = state["corrections"].get(filename)
         grade_text = text + (f"\n\n[教师修改意见，本次重评须重点回应] {corrections}" if corrections else "")
-        outcome = grader.grade_single(filename, grade_text,
-                                      image_descriptions=_image_descriptions(image_entries),
-                                      references=references)
+
+        # 重评且正文、维度名都没变：归类结果可复用，省掉一次模型调用
+        criterion_names = {c["name"] for c in grader.rubric.get("criteria", [])}
+        previous = next((r for r in grader.results if r.get("report_id") == filename), None)
+        reusable = False
+        if previous and previous.get("_report_text") == text:
+            prior_text = previous.get("text_assignments") or {}
+            prior_images = previous.get("image_assignments") or {}
+            chunk_ids = {f"p{i}" for i in range(len(chunks))}
+            image_ids = {e["id"] for e in image_entries}
+            reusable = (set(prior_text) == chunk_ids and set(prior_images) == image_ids
+                        and all((a or {}).get("criterion") in criterion_names
+                                for a in list(prior_text.values()) + list(prior_images.values())))
+
+        def run_assign():
+            usage_store.set_report(filename)
+            try:
+                return grader.assign_items(image_entries + chunk_entries, shots_query=text[:1500])
+            finally:
+                usage_store.set_report(None)
+
+        def run_grade():
+            usage_store.set_report(filename)
+            try:
+                return grader.grade_single(
+                    filename, grade_text, image_descriptions=_image_descriptions(image_entries),
+                    references=references)
+            finally:
+                usage_store.set_report(None)
+
+        # 归类与判级互不依赖：并行可省掉一次模型往返；单路模式保持串行，避免本地模型被并发拖慢
+        if reusable:
+            assignments = {**previous.get("text_assignments", {}),
+                           **previous.get("image_assignments", {})}
+            outcome = run_grade()
+        elif _grading_workers() > 1:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="report") as pool:
+                assign_future = pool.submit(run_assign)
+                grade_future = pool.submit(run_grade)
+                assignments = assign_future.result()
+                outcome = grade_future.result()
+        else:
+            assignments = run_assign()
+            outcome = run_grade()
+        text_assignments = {k: v for k, v in assignments.items() if k.startswith("p")}
+        image_assignments = {k: v for k, v in assignments.items() if not k.startswith("p")}
         result = outcome["result"]
         state["corrections"].pop(filename, None)
         if result.get("status") == "graded":
@@ -1295,35 +1336,74 @@ def _grade_one(grader, entry, references=""):
         usage_store.set_report(None)
 
 
+def _grading_workers():
+    try:
+        return max(1, min(8, int(os.environ.get("ERG_GRADING_WORKERS", "3"))))
+    except ValueError:
+        return 3
+
+
+def _grade_targets(grader, targets, references, status):
+    """按报告并行；并发数受 ERG_GRADING_WORKERS 限制，取消后不再派新任务。"""
+    workers = _grading_workers()
+    if workers <= 1 or len(targets) <= 1:
+        for entry in targets:
+            if status.get("cancel"):
+                return
+            status["current"] = entry["meta"]["filename"]
+            try:
+                _grade_one(grader, entry, references)
+            except Exception as e:  # 单份失败不拖垮整轮
+                grader.record_failure(entry["meta"]["filename"], e)
+            status["done"] = status.get("done", 0) + 1
+        return
+
+    pending, queue = {}, iter(targets)
+
+    def submit(pool):
+        if status.get("cancel"):
+            return
+        try:
+            entry = next(queue)
+        except StopIteration:
+            return
+        pending[pool.submit(_grade_one, grader, entry, references)] = entry
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="grade") as pool:
+        for _ in range(min(workers, len(targets))):
+            submit(pool)
+        while pending:
+            finished, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+            for future in finished:
+                entry = pending.pop(future)
+                try:
+                    future.result()
+                except Exception as e:
+                    grader.record_failure(entry["meta"]["filename"], e)
+                status["done"] = status.get("done", 0) + 1
+                status["current"] = entry["meta"]["filename"]
+                submit(pool)
+
+
 def _spawn_grading(target_fn):
     def work():
         grader = state["grader"]
         try:
             targets = target_fn()
             state["grading_status"] = {"phase": "running", "done": 0, "total": len(targets),
-                                       "current": "", "cancel": False, "message": ""}
+                                       "current": "", "cancel": False, "message": "",
+                                       "workers": _grading_workers()}
             references = _mcp_references(" ".join(
                 c["name"] for c in (state.get("rubric_json") or {}).get("criteria", [])))
             state["mcp_refs"] = references
-            for i, entry in enumerate(targets):
-                status = state["grading_status"]
-                if status.get("cancel"):
-                    status.update(phase="cancelled", current="",
-                                  message="已取消，未评分的报告可重新开始评分")
-                    _export_all()
-                    return
-                status["current"] = entry["meta"]["filename"]
-                try:
-                    _grade_one(grader, entry, references)
-                except Exception as e:  # 单份失败不拖垮整轮
-                    grader.results.append({"report_id": entry["meta"]["filename"],
-                                           "status": "llm_failed", "error": str(e)[:300],
-                                           "graded_at": time.time()})
-                status["done"] = i + 1
+            _grade_targets(grader, targets, references, state["grading_status"])
             grader.export_results()
             _export_all()
-            state["grading_status"].update(phase="done", current="",
-                                           message="全部完成" if not state["grading_status"].get("cancel") else "")
+            if state["grading_status"].get("cancel"):
+                state["grading_status"].update(phase="cancelled", current="",
+                                               message="已取消，未评分的报告可重新开始评分")
+            else:
+                state["grading_status"].update(phase="done", current="", message="全部完成")
         except Exception as e:
             state["grading_status"] = {"phase": "error", "message": str(e)[:300], "done": 0, "total": 0}
 
@@ -1438,8 +1518,8 @@ def start_grading():
                                  llm_client=llm(state["config"]), config=state["config"],
                                  output_dir=session_sub("grading"),
                                  similarity_scope=state.get("session"), kb_session_dir=session_dir())
-        state["grader"].results = [r for r in prev_results
-                                   if r["report_id"] not in {t["meta"]["filename"] for t in targets}]
+        # 保留旧结果，评完由 _finish 覆盖；中途取消不至于丢掉上一轮成绩
+        state["grader"].results = prev_results
         state["grading_status"] = {"phase": "running", "done": 0, "total": len(targets), "current": ""}
         _spawn_grading(lambda: targets)
     if wants_json:
@@ -1719,6 +1799,102 @@ def api_balance_reset():
     balance_store.reset()
     events = (state.get("usage") or {}).get("events") or []
     return jsonify(balance_store.refresh(state["config"], events, force=True))
+
+
+@app.route("/api/vector")
+def api_vector():
+    try:
+        store = Chroma(config=(state.get("config") or {}).get("vector_store") or {},
+                       session_dir=session_dir(), create=False)
+        rows = []
+        for collection in store.client.list_collections():
+            meta = dict(collection.metadata or {})
+            rows.append({
+                "name": collection.name,
+                "count": collection.count(),
+                "dimension": _collection_dimension(collection),
+                "metadata": _short_meta(meta),
+                "kind": ("全文库" if collection.name == "grading_cases"
+                         else "维度库" if collection.name.startswith("dim_") else "其他"),
+                "label": meta.get("dimension") or collection.name,
+            })
+        rows.sort(key=lambda row: (row["kind"] != "全文库", row["name"]))
+        return jsonify({"collections": rows, "total": len(rows)})
+    except Exception as exc:
+        return jsonify({"error": f"读取向量库失败：{exc}"}), 500
+
+
+@app.route("/api/vector/<path:name>")
+def api_vector_collection(name):
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except ValueError:
+        return jsonify({"error": "分页参数无效"}), 400
+    try:
+        store = Chroma(config=(state.get("config") or {}).get("vector_store") or {},
+                       session_dir=session_dir(), create=False)
+        collection = store.client.get_collection(name)
+    except Exception:
+        return jsonify({"error": "collection 不存在"}), 404
+    try:
+        total = collection.count()
+        got = collection.get(limit=limit, offset=offset,
+                             include=["documents", "metadatas", "embeddings"])
+        ids = got.get("ids") or []
+        docs = got.get("documents") or []
+        metas = got.get("metadatas") or []
+        vectors = got.get("embeddings")
+        vectors = list(vectors) if vectors is not None else []
+        items = []
+        for index, item_id in enumerate(ids):
+            doc = docs[index] if index < len(docs) and docs[index] else ""
+            vector = vectors[index] if index < len(vectors) else None
+            items.append({
+                "id": item_id,
+                "document": doc[:4000],
+                "docChars": len(doc),
+                "truncated": len(doc) > 4000,
+                "metadata": _short_meta(metas[index] if index < len(metas) else {}),
+                "dimension": len(vector) if vector is not None else None,
+                "embeddingPreview": [round(float(value), 5) for value in list(vector)[:8]]
+                                    if vector is not None else [],
+            })
+        return jsonify({
+            "name": name,
+            "label": (collection.metadata or {}).get("dimension") or name,
+            "kind": ("全文库" if name == "grading_cases"
+                     else "维度库" if name.startswith("dim_") else "其他"),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "dimension": _collection_dimension(collection),
+            "metadata": _short_meta(dict(collection.metadata or {})),
+            "items": items,
+        })
+    except Exception as exc:
+        return jsonify({"error": f"读取 collection 失败：{exc}"}), 500
+
+
+def _collection_dimension(collection):
+    try:
+        got = collection.get(limit=1, include=["embeddings"])
+        vectors = got.get("embeddings")
+        if vectors is not None and len(vectors):
+            return len(vectors[0])
+    except Exception:
+        pass
+    return None
+
+
+def _short_meta(value, limit=800):
+    if isinstance(value, str):
+        return value if len(value) <= limit else value[:limit] + "…"
+    if isinstance(value, dict):
+        return {key: _short_meta(item, limit) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_short_meta(item, limit) for item in value[:20]]
+    return value
 
 
 @app.route("/api/usage")

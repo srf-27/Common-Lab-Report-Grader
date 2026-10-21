@@ -10,9 +10,7 @@ import os
 import threading
 import time
 
-from openai import OpenAI
-
-from ..utils.llm_client import LLMClient
+from ..utils.llm_client import LLMClient, openai_client
 
 # (缓存命中输入, 缓存未命中输入, 输出)，单位：元 / 百万 token，均为高峰价
 PRICES = {
@@ -304,7 +302,7 @@ class MeteredLLM(LLMClient):
     def _call_openai(self, messages, temperature):
         cfg = self.config["openai"]
         api_key = os.environ.get(cfg["api_key"], cfg["api_key"])
-        client = OpenAI(api_key=api_key, base_url=cfg.get("base_url"), timeout=300, max_retries=0)
+        client = openai_client(api_key, cfg.get("base_url"))
         started = time.perf_counter()
         try:
             resp = client.chat.completions.create(

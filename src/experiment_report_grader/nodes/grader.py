@@ -2,7 +2,9 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from ..embedding import Chroma, create_embedding_function
 from ..factory import llm as make_llm
@@ -91,6 +93,15 @@ class Grader:
         self.output_dir = output_dir or os.path.join(os.path.dirname(__file__), "..", "output", "grading")
         os.makedirs(self.output_dir, exist_ok=True)
         self.results = []
+        self._results_lock = threading.RLock()
+        self._kb_lock = threading.RLock()
+        self._cache_lock = threading.RLock()
+        self._embedding_lock = threading.RLock()
+        self._embedding_cache = {}
+        try:
+            self.parallel_checks = int(os.environ.get("ERG_GRADING_WORKERS", "3")) > 1
+        except ValueError:
+            self.parallel_checks = True
         self.session_scope = similarity_scope or "default"
         vector_cfg = self.config.get("vector_store") or {}
         self.kb = Chroma(config=vector_cfg, session_dir=kb_session_dir)  # 全文相似度库
@@ -109,13 +120,14 @@ class Grader:
         return os.path.join(self.output_dir, "checks_cache.json")
 
     def _load_checks(self):
-        if self._checks_cache is None:
-            try:
-                with open(self._checks_path(), encoding="utf-8") as f:
-                    self._checks_cache = json.load(f)
-            except Exception:
-                self._checks_cache = {}
-        return self._checks_cache
+        with self._cache_lock:
+            if self._checks_cache is None:
+                try:
+                    with open(self._checks_path(), encoding="utf-8") as f:
+                        self._checks_cache = json.load(f)
+                except Exception:
+                    self._checks_cache = {}
+            return self._checks_cache
 
     def _save_checks(self):
         cache = self._checks_cache or {}
@@ -146,26 +158,54 @@ class Grader:
             value = check_content_safety(text, self.llm)
         # 检测失败或只审了前半段都不缓存，下次重试
         if not value.get("detection_failed") and not value.get("truncated"):
-            cache[key] = {**value, "at": time.time()}
-            self._save_checks()
+            with self._cache_lock:
+                cache[key] = {**value, "at": time.time()}
+                self._save_checks()
         return value
 
     # ---------- RAG ----------
+    def _query_vector(self, text):
+        """同一份正文的 query embedding 只算一次，维度参考不再逐维重新嵌入。"""
+        key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        with self._embedding_lock:
+            if key in self._embedding_cache:
+                return self._embedding_cache[key]
+        try:
+            vector = self.kb.collection._embed([text], is_query=True)[0]
+        except Exception:
+            vector = None
+        with self._embedding_lock:
+            if len(self._embedding_cache) > 200:
+                self._embedding_cache.clear()
+            self._embedding_cache[key] = vector
+        return vector
+
+    def _query_collection(self, collection, text, n_results):
+        vector = self._query_vector(text)
+        if vector is not None:
+            try:
+                return collection.query(query_embeddings=[vector], n_results=n_results)
+            except Exception:
+                pass
+        return collection.query(query_texts=[text], n_results=n_results)
+
     def _dimension_collection(self, name):
         """每个维度一个库：存该维度已终审的 chunk，评分时作 RAG 参考。"""
-        if name not in self.dimension_collections:
-            key = "dim_" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
-            self.dimension_collections[name] = self.kb.client.get_or_create_collection(
-                name=key, metadata={"hnsw:space": "cosine", "dimension": name},
-                embedding_function=self.embedding_function)
-        return self.dimension_collections[name]
+        with self._kb_lock:
+            if name not in self.dimension_collections:
+                key = "dim_" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
+                self.dimension_collections[name] = self.kb.client.get_or_create_collection(
+                    name=key, metadata={"hnsw:space": "cosine", "dimension": name},
+                    embedding_function=self.embedding_function)
+            return self.dimension_collections[name]
 
     def _dimension_references(self, name, text, n_results=2):
         collection = self._dimension_collection(name)
-        total = collection.count()
-        if total == 0 or not text.strip():
-            return ""
-        hits = collection.query(query_texts=[text], n_results=min(n_results, total))
+        with self._kb_lock:
+            total = collection.count()
+            if total == 0 or not text.strip():
+                return ""
+            hits = self._query_collection(collection, text, min(n_results, total))
         return "\n".join(
             f"- （相似度 {1 - distance:.2f}，历史等级 {meta.get('level') or '未定'}）{doc[:200]}"
             for doc, meta, distance in zip(hits["documents"][0], hits["metadatas"][0],
@@ -177,10 +217,11 @@ class Grader:
         return self.remembered
 
     def _check_similarity(self, report_id, text):
-        total = self.kb.count()
-        if total == 0 or not text.strip():
-            return []
-        hits = self.kb.query(text, n_results=min(total, 10))
+        with self._kb_lock:
+            total = self.kb.count()
+            if total == 0 or not text.strip():
+                return []
+            hits = self._query_collection(self.kb.collection, text, min(total, 10))
         warnings = []
         for matched, distance in zip(hits["ids"][0], hits["distances"][0]):
             if matched == report_id:
@@ -192,27 +233,39 @@ class Grader:
         return warnings
 
     def _remember_report(self, report_id, text, grading=None):
+        if not text.strip():
+            return False
+        with self._kb_lock:
+            known = self._known_ids()
+            already = report_id in known
+        if already:
+            if grading:
+                metadata = {"report_id": report_id, "scope": self.session_scope,
+                            "grading_json": anonymize_text(
+                                json.dumps(grading, ensure_ascii=False), self.llm)[0]}
+                with self._kb_lock:
+                    self.kb.collection.update(ids=[report_id], metadatas=[metadata])
+            return False
+        anon_text = anonymize_text(text, self.llm)[0]
         metadata = {"report_id": report_id, "scope": self.session_scope}
         if grading:
             metadata["grading_json"] = anonymize_text(json.dumps(grading, ensure_ascii=False), self.llm)[0]
-        known = self._known_ids()
-        if report_id in known:
-            if grading:
-                self.kb.collection.update(ids=[report_id], metadatas=[metadata])
-            return False
-        if not text.strip():
-            return False
-        self.kb.add(ids=[report_id], documents=[anonymize_text(text, self.llm)[0]],
-                    metadatas=[metadata])
-        known.add(report_id)
-        return True
+        with self._kb_lock:
+            if report_id in self._known_ids():
+                if grading:
+                    self.kb.collection.update(ids=[report_id], metadatas=[metadata])
+                return False
+            self.kb.add(ids=[report_id], documents=[anon_text], metadatas=[metadata])
+            self.remembered.add(report_id)
+            return True
 
     def _exemplar_shots(self, query_text, n_cases=2, max_chars=1200):
         """取 1-2 份得分最高的已终审报告（正文节选 + 其各维度判定）作为提示词 shots。"""
-        total = self.kb.count()
-        if total == 0 or not query_text.strip():
-            return ""
-        hits = self.kb.query(query_text, n_results=min(total, 5))
+        with self._kb_lock:
+            total = self.kb.count()
+            if total == 0 or not query_text.strip():
+                return ""
+            hits = self._query_collection(self.kb.collection, query_text, min(total, 5))
         cases = []
         for document, metadata in zip(hits["documents"][0], hits["metadatas"][0]):
             grading = _parse_json((metadata or {}).get("grading_json") or "")
@@ -416,7 +469,16 @@ class Grader:
 
     # ---------- 单份评分 ----------
     def grade_single(self, report_id, text, image_descriptions=None, references=""):
-        injection = self._cached_check("injection", text)
+        # 注入与内容安全互不依赖：并行发，正常报告少一次模型往返
+        if self.parallel_checks:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="check") as pool:
+                injection_future = pool.submit(self._cached_check, "injection", text)
+                safety_future = pool.submit(self._cached_check, "safety", text)
+                injection = injection_future.result()
+                safety = safety_future.result()
+        else:
+            injection = self._cached_check("injection", text)
+            safety = None
         if injection["is_injection"]:
             return self._finish({"report_id": report_id, "status": "flagged_injection",
                                  "injection_details": injection, "graded_at": time.time()}, False)
@@ -426,7 +488,8 @@ class Grader:
             return self._finish({"report_id": report_id, "status": status,
                                  "injection_details": injection, "graded_at": time.time()}, False)
 
-        safety = self._cached_check("safety", text)
+        if safety is None:
+            safety = self._cached_check("safety", text)
         if safety["verdict"] == "blocked":
             return self._finish({"report_id": report_id, "status": "blocked_safety",
                                  "safety_details": safety, "graded_at": time.time()}, False)
@@ -495,9 +558,16 @@ class Grader:
         return ordered
 
     def _finish(self, result, needs_review):
-        self.results = [r for r in self.results if r["report_id"] != result["report_id"]]
-        self.results.append(result)
+        with self._results_lock:
+            self.results = [r for r in self.results if r["report_id"] != result["report_id"]]
+            self.results.append(result)
         return {"result": result, "needs_review": needs_review}
+
+    def record_failure(self, report_id, error):
+        with self._results_lock:
+            self.results = [r for r in self.results if r["report_id"] != report_id]
+            self.results.append({"report_id": report_id, "status": "llm_failed",
+                                 "error": str(error)[:300], "graded_at": time.time()})
 
     def finalize_report(self, report_id, text=None):
         """单份报告终审入 RAG：全文进全文库，维度 chunk 进对应维度库。"""

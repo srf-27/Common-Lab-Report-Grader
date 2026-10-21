@@ -1,9 +1,25 @@
 """checked"""
 
 import os
+import threading
+
 import yaml
 from pathlib import Path
 from openai import OpenAI
+
+_CLIENTS = {}
+_CLIENTS_LOCK = threading.Lock()
+
+
+def openai_client(api_key, base_url, timeout=300):
+    """复用 OpenAI/httpx 连接池；每次 new 客户端会重新做 DNS/TLS 握手。"""
+    key = (api_key or "", base_url or "", timeout)
+    with _CLIENTS_LOCK:
+        client = _CLIENTS.get(key)
+        if client is None:
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
+            _CLIENTS[key] = client
+        return client
 
 
 def load_config(config_path=None):
@@ -41,7 +57,7 @@ class LLMClient:
     def _call_openai(self, messages, temperature):
         cfg = self.config["openai"]
         api_key = os.environ.get(cfg["api_key"], cfg["api_key"])
-        client = OpenAI(api_key=api_key, base_url=cfg.get("base_url"), timeout=300, max_retries=0)
+        client = openai_client(api_key, cfg.get("base_url"))
         resp = client.chat.completions.create(
             model=cfg["model"],
             messages=messages,
@@ -61,7 +77,7 @@ class LLMClient:
 
     def _call_custom(self, messages, temperature):
         cfg = self.config["custom"]
-        client = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"])
+        client = openai_client(cfg["api_key"], cfg["base_url"])
         resp = client.chat.completions.create(
             model=cfg["model"],
             messages=messages,
