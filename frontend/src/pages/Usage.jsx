@@ -266,7 +266,7 @@ function Chart({ buckets, days, scale = 1 }) {
             className="u-axis"
             textAnchor="start"
           >
-            ¥{money(value)}
+            ${money(value)}
           </text>
         ))}
 
@@ -318,7 +318,7 @@ function Chart({ buckets, days, scale = 1 }) {
           <div className="u-tip-time">
             {dayLabel(rows[hover].t)} {days <= 1 ? clock(rows[hover].t) : ""}
           </div>
-          <div className="u-tip-row"><i style={{ background: SERIES[0].color }} />成本<b>¥{money(rows[hover].cost)}</b></div>
+          <div className="u-tip-row"><i style={{ background: SERIES[0].color }} />成本<b>${money(rows[hover].cost)}</b></div>
           <div className="u-tip-row"><i style={{ background: SERIES[1].color }} />缓存命中<b>{fmtCN(rows[hover].cached)}</b></div>
           <div className="u-tip-row"><i style={{ background: SERIES[2].color }} />输入<b>{fmtCN(rows[hover].input)}</b></div>
           <div className="u-tip-row"><i style={{ background: SERIES[3].color }} />输出<b>{fmtCN(rows[hover].output)}</b></div>
@@ -458,7 +458,11 @@ export default function Usage() {
               {scale !== 1 ? <em className="u-cal" title={`估算 × ${factor}（按余额差校准）`}>已校准</em> : null}
             </span>
             <b title="只统计本应用发起的调用；DeepSeek 后台金额还含其他客户端与历史调用">
-              ¥{cost(summary.cost)}
+              {summary.cost_by_currency && Object.keys(summary.cost_by_currency).length > 1
+                ? Object.entries(summary.cost_by_currency)
+                    .map(([cur, v]) => `${cur === "CNY" ? "¥" : "$"}${cost(v)}`)
+                    .join(" + ")
+                : `${summary.cost_by_currency?.CNY != null ? "¥" : "$"}${cost(summary.cost)}`}
             </b>
           </div>
         </div>
@@ -582,15 +586,15 @@ export default function Usage() {
         </Tile>
         <Tile
           label="缓存节省"
-          value={`¥${money(summary.cache_saving)}`}
+          value={`$${money(summary.cache_saving)}`}
           hint="命中 token 比按未命中计价少花的钱（按各次调用的模型与时段折算）"
         />
         <Tile
           label="每份报告"
-          value={summary.cost_per_report == null ? "—" : `¥${cost(summary.cost_per_report)}`}
+          value={summary.cost_per_report == null ? "—" : `$${cost(summary.cost_per_report)}`}
           hint={
             summary.reports
-              ? `本范围 ${summary.reports} 份报告，合计 ¥${cost(summary.report_cost)}（含扫描与评分）`
+              ? `本范围 ${summary.reports} 份报告，合计 $${cost(summary.report_cost)}（含扫描与评分）`
               : "还没有带报告归属的调用记录"
           }
         />

@@ -1,4 +1,4 @@
-"""用量统计：峰谷计价、缓存命中折扣、旧文件迁移、按课程隔离。"""
+"""用量统计：cc-switch 口径计价、币种、未定价、旧文件迁移、按课程隔离。"""
 import json
 import os
 import sys
@@ -16,18 +16,39 @@ def _ts(hour, minute=0):
     return time.mktime((now.tm_year, now.tm_mon, now.tm_mday, hour, minute, 0, 0, 0, -1))
 
 
-def test_peak_and_offpeak_rates():
-    peak = usage.rates_for("deepseek-v4-flash", _ts(10))
-    off = usage.rates_for("deepseek-v4-flash", _ts(20))
-    assert peak == (0.10, 3.0, 9.0), peak
-    assert off == (0.05, 1.5, 4.5), off
+def test_cc_switch_style_cost():
+    from experiment_report_grader.web import pricing
+    amt, cur = pricing.cost_of("deepseek-flash", 100_000, 50_000, 0, 10_000)
+    assert cur == "USD"
+    assert abs(amt - (100_000 * 0.15 + 50_000 * 0.003 + 10_000 * 0.6) / 1e6) < 1e-9
+    # 四槽齐全的模型：缓存写也计价
+    amt2, _ = pricing.cost_of("claude-sonnet-4-5", 0, 0, 1_000_000, 0)
+    assert abs(amt2 - 3.75) < 1e-9
+    # 未定价：None，不乱算
+    assert pricing.cost_of("no-such-model", 1, 0, 0, 1) == (None, None)
 
 
-def test_cost_splits_cache_hit():
-    ts = _ts(10)
-    assert abs(usage.cost_of("deepseek-v4-flash", 1_000_000, 0, 0, ts) - 0.10) < 1e-9
-    assert abs(usage.cost_of("deepseek-v4-flash", 0, 1_000_000, 0, ts) - 3.0) < 1e-9
-    assert abs(usage.cost_of("deepseek-v4-flash", 1_000_000, 1_000_000, 0, ts) - 3.10) < 1e-9
+def test_model_id_cleaning():
+    from experiment_report_grader.web import pricing
+    assert pricing.clean_id("deepseek/deepseek-flash:latest") == "deepseek-flash"
+    assert pricing.clean_id("claude-haiku-4-5-20251001") == "claude-haiku-4-5"
+    assert pricing.clean_id("model@v2") == "model-v2"
+
+
+def test_pricing_overrides_win():
+    import json as _json
+    from experiment_report_grader.web import pricing
+    real_folder = pricing._output_folder
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as td:
+        pricing._output_folder = lambda: td
+        pricing.reset_cache()
+        with open(os.path.join(td, "pricing_overrides.json"), "w", encoding="utf-8") as f:
+            _json.dump({"deepseek-flash": {"input": 1.0, "output": 2.0, "currency": "CNY"}}, f)
+        price = pricing.lookup("deepseek-flash")
+        assert price["input"] == 1.0 and price["currency"] == "CNY"
+        pricing._output_folder = real_folder
+        pricing.reset_cache()
 
 
 def test_record_and_payload():
