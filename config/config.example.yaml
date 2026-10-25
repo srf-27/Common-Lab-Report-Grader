@@ -33,6 +33,7 @@ rubric_iteration:
 
 extraction:
   image_context_lines: 2
+  markitdown_fallback: true  # 本地解析不支持/失败时（html/pptx/xlsx/epub 等）经 markitdown MCP 插件转 Markdown；插件缺席则保持原行为
 
 safety:
   injection_detect: true

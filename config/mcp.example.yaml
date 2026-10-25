@@ -14,4 +14,9 @@
 #     url: "http://127.0.0.1:8931/mcp"
 #     headers: {}
 #     note: "远程学科参考"
+#
+#   markitdown:                   # 文档转 Markdown（报告解析兜底，html/pptx/xlsx/epub）
+#     transport: stdio
+#     command: markitdown-mcp     # pip install markitdown-mcp
+#     note: "报告格式兜底转换"
 servers: {}
