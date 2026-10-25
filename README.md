@@ -46,7 +46,7 @@
 - **非报告维度**：预习、课堂、操作等全部保留但默认停用，权重不动、导出留空列；可上传成绩单补分。
 - **报告表格**：DOCX/PDF 提取出的 Markdown 表格现在会还原成表格，不再显示成一堆竖线。
 - **上传框**：支持拖拽，边框与留白重做；报告与标准各自独立，不再串任务。
-- **经典版退役**：Jinja 模板与旧样式全部删除，`/classic`、`/rubric_review` 等历史路径 302 到对应的 SPA 页面。
+- **经典版退役**：Jinja 模板、旧样式与 `/classic`、`/rubric_review` 等历史兼容路径已全部删除，页面统一走 SPA。
 - **向量库管理**：新增「系统 → 向量库」页，列出当前课程的 collection、条数、维度与元数据，可逐条查看正文与向量预览；支持清空当前课程向量库。
 
 ---
@@ -311,14 +311,17 @@ python run.py --port 8080 --host 0.0.0.0
 | `vector_store.backend`                         | 向量库类型                                    | `chroma`                     |
 | `vector_store.chroma.mode`                     | `local`（每课程独立目录）或 `cloud`（Chroma Server） | `local`                      |
 | `vector_store.embedding.backend`               | `default`（内置离线）或 `openai`（`/embeddings`） | `default`                    |
+| `storage.backend`                              | `auto`（配了 dsn 用 PG）或 `file`             | `auto`                       |
+| `storage.postgres.dsn`                         | PostgreSQL 连接串（环境变量 `ERG_PG_DSN` 优先）；留空/连不上自动回退本地文件 | `""`              |
 
-> `config/config.yaml`、`embedding/*`、`utils/{llm_client,file_parser,doc_reader,ocr_engine}.py`、`nodes/report_extractor.py` 文件首行标了 `checked`，属于受保护文件：改造时不改，能力扩展走新模块。
+> 曾有"文件首行标 `checked` 的受保护文件"约定，现已退役：所有文件按普通代码对待，改动走正常 review；能力扩展仍建议优先走新模块。
 
 ---
 
 ## 数据在哪 / 隐私
 
-- 所有数据只落在本机 `data/output/sessions/<课程>/`：`rubrics/`（细则与两份原文）、`pilot/`（样本校准的报告与 AI/教师等级）、`reports/`（正文、插图、meta）、`grading/`（结果与导出）、`uploads/`（原件）。
+- 默认所有数据只落在本机 `data/output/sessions/<课程>/`：`rubrics/`（细则与两份原文）、`pilot/`（样本校准的报告与 AI/教师等级）、`reports/`（正文、插图、meta）、`grading/`（结果与导出）、`uploads/`（原件）。
+- **可选 PostgreSQL**：`storage.postgres.dsn` 配置后，全部结构化数据（细则、报告正文与 meta、评分结果、终审、用量、教师重评意见、任务/评分终态、校准工作区）改存 PostgreSQL，首次启用会自动把本地已有 JSON 一次性导入；未配置或连接失败时静默回退本地文件，行为与原来完全一致。**不迁**的仍是本地文件：报告插图与上传原件、Excel 导出、Chroma 向量库。教师重评意见与任务终态原先只在内存（重启即丢），现在无论哪个后端都会持久化。
 - 停用维度的成绩单存在 `<课程>/external_scores.json`；合并结果会写回各报告的小计。
 - `config/config.yaml` 里可能有明文 key，**已被 `.gitignore` 排除**，不要提交。
 - 进入 RAG 案例库前会做隐私脱敏：姓名、学号、电话、邮箱、身份证、住址替换为占位符（模型不可用时用正则兜底）。
@@ -397,6 +400,7 @@ config/
 src/experiment_report_grader/
   app.py                    所有 HTTP 路由（编排层；含 /pilot/* 样本校准、/rubric_external_upload）
   factory.py                模型实例工厂（测试替换点）
+  storage.py                统一持久化入口：本地文件 / PostgreSQL 双后端，PG 不可用静默降级
   web/state.py              课程会话、目录、审批记录、MCP 挂载、状态恢复
   web/tasks.py              上传处理的后台任务进度
   nodes/                    评分业务
@@ -418,7 +422,6 @@ docs/
   PROJECT_STRUCTURE.md      模块职责、数据流、扩展点
   MCP.md                    插件协议、示例、排障
   TESTING.md                测试矩阵与实测结果
-  HIG.md / HEROUI.md        旧版界面说明（仅存档）
 tests/
   run_all.py                零依赖测试入口（无需 pytest）
   unit/                     单元测试
@@ -431,7 +434,7 @@ tests/
 ## 开发与测试
 
 ```bash
-# 后端测试（79 项，不需要 pytest）
+# 后端测试（85 项，不需要 pytest）
 python tests/run_all.py
 python tests/run_all.py -k mcp        # 按名字过滤
 
@@ -463,7 +466,7 @@ python scripts/ocr_check.py --backend api
 
 ## 已知限制
 
-- **单进程内存态**：同一课程只支持一位教师同时操作（评分线程有锁，但状态在进程内）。
+- **单进程内存态**：同一课程只支持一位教师同时操作（评分线程有锁，但状态在进程内）。评分/上传等后台任务已做会话隔离：运行中切换课程，旧任务只写旧会话，不会污染当前课程。
 - **相似度只做提示**：整篇一个向量，长报告与模板化报告会被嵌入模型截断，不能当抄袭判据；也没有做段落级比对。
 - **送模型的正文上限 8000 字符**（超出部分不参与评分），插图取前 20 张描述。
 - **停用维度的总分上限低于 100**：权重按约定保留、不重算，想补齐要么取消停用，要么上传课外成绩单。

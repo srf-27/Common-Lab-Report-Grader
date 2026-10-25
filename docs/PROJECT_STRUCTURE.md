@@ -15,7 +15,6 @@ tests/                  测试（run_all.py 零依赖入口、unit、integration
 scripts/                辅助脚本（view_kb.py 查看向量库、ocr_check.py 验 OCR）
 docs/                   本文档目录
 data/output/sessions/   运行时数据（课程目录，gitignore）
-output/                 历史遗留输出，可手工删除
 ```
 
 ## 包结构
@@ -24,10 +23,15 @@ output/                 历史遗留输出，可手工删除
 experiment_report_grader/
 ├── app.py                     路由与编排（约 700 行）：会话、细则、报告、评分、终审、导出、配置、插件
 ├── factory.py                 LLM 工厂：llm(config) → LLMClient；测试通过替换 _make 注入假模型
+├── storage.py                 统一持久化入口：read/write_json/text；本地文件（默认）或 PostgreSQL
+│                              （storage.postgres.dsn，key=会话目录相对路径，表 session_kv）；
+│                              PG 未配置/不可用时静默回退文件；首次连上自动迁移本地 JSON
 ├── web/
 │   ├── state.py               课程会话与全局状态：目录、sessions.json、approved.json、mcp.json、
 │   │                          花名册、hydrate_session（按目录重建内存态，含图片列表与评分结果）
-│   └── tasks.py               上传处理的后台任务进度（start/update/cancel/finish/running）
+│   │                          RUNNING_STATUS：sid→评分进度注册表，会话隔离与切课恢复
+│   └── tasks.py               上传处理的后台任务进度（start/update/cancel/finish/running），
+│                              按会话登记（RUNNING_TASKS），线程持 task dict 引用更新
 ├── nodes/
 │   ├── grader.py              判级主流程
 │   │                          · _check_similarity / _remember_report：全文相似度与入库
@@ -43,12 +47,12 @@ experiment_report_grader/
 │   ├── verifier.py            机械判裁判：LLM 生成 verify(text) → AST 白名单校验 → 受限 builtins 执行；
 │   │                          失败回退 verify(text, rules) 正则解释器
 │   ├── agreement.py           Cohen's κ / 二次加权 κ / Krippendorff's α + 混淆计数
-│   └── report_extractor.py    报告解析调度（压缩包递归、按扩展名分派）— 受保护
+│   └── report_extractor.py    报告解析调度（压缩包递归、按扩展名分派）
 ├── utils/
-│   ├── llm_client.py          OpenAI / Ollama / custom 客户端 — 受保护
-│   ├── file_parser.py         PDF（pymupdf4llm 版面分析）/ DOCX（含表格与图片顺序）/ MD / 压缩包 — 受保护
-│   ├── doc_reader.py          老式 .doc（OLE2 piece table + 图片签名切分）— 受保护
-│   ├── ocr_engine.py          OCREngine 单例：paddleocr 2/3 与视觉 API 两种后端 — 受保护
+│   ├── llm_client.py          OpenAI / Ollama / custom 客户端
+│   ├── file_parser.py         PDF（pymupdf4llm 版面分析）/ DOCX（含表格与图片顺序）/ MD / 压缩包
+│   ├── doc_reader.py          老式 .doc（OLE2 piece table + 图片签名切分）
+│   ├── ocr_engine.py          OCREngine 单例：paddleocr 2/3 与视觉 API 两种后端
 │   ├── ocr_check.py           合成图 → 识别 → 相似度（配置页按钮与 scripts/ocr_check.py 共用）
 │   ├── injection_detector.py  LLM 语义检测；不可见字符规范化 + 扫描摘要；失败转人工
 │   ├── content_safety.py      LLM 语义检测；失败 fail-open 并标记
@@ -64,7 +68,7 @@ experiment_report_grader/
 
 ## 前端（SPA）
 
-`/` 与 `/app/*` 只由 React 单页应用承载；旧的 Jinja 页面已全部退役，`/classic`、`/rubric_review` 等历史路径 302 到对应的 SPA 页面。
+`/` 与 `/app/*` 只由 React 单页应用承载；旧的 Jinja 页面与历史兼容路径（`/classic`、`/rubric_review` 等）已全部删除。
 
 ```
 frontend/
@@ -141,16 +145,13 @@ data/output/sessions/<课程ID>/
 |---|---|
 | 换模型/换网关 | 「配置」页或 `config.yaml` 的 `llm`；不改代码 |
 | 加一个学科知识源 | 写/接一个 MCP 服务，在「插件」页登记并挂载；不改代码 |
-| 换向量库 | 实现 `embedding/base.py::VectorStoreBase` 的子类，在 `nodes/grader.py` 的客户端选择处接入；`base.py` 本身受保护但可新增子类文件 |
+| 换向量库 | 实现 `embedding/base.py::VectorStoreBase` 的子类，在 `nodes/grader.py` 的客户端选择处接入 |
 | 换嵌入模型 | 「配置」页 `embedding.backend=openai` + 模型名 |
 | 加机械判决规则类型 | `nodes/verifier.py::_verify_one` 增加分支，并在细则生成提示词里同步允许的 type |
 | 改评分提示词 | `nodes/grader.py::GRADING_PROMPT`（保持 JSON 输出契约） |
 | 加页面 | `frontend/src/pages/` 新建页面 + `app.jsx` 的 `Page` 与 `NAV` |
 | 改判级分值 | `nodes/rubric_io.py::LEVEL_POINTS`（导出与一致性同步生效） |
 
-## 受保护文件（文件首行 `checked`）
+## 受保护文件约定（已退役）
 
-`config/config.yaml`、`config/config.example.yaml`、`embedding/{base,chroma,__init__}.py`、
-`nodes/report_extractor.py`、`utils/{doc_reader,file_parser,llm_client,ocr_engine}.py`
-
-改造时不直接修改；能力扩展通过新模块或调用完成（例如 OCR 自检放在 `utils/ocr_check.py`，图片 OCR 开关放在 `app.py` 的 `_image_entries`）。
+曾有"文件首行标 `checked` 的受保护文件"约定，2026-10 已退役，标识全部移除：所有文件按普通代码对待，改动走正常 review。能力扩展仍建议优先走新模块（例如 OCR 自检放在 `utils/ocr_check.py`，图片 OCR 开关放在 `app.py` 的 `_image_entries`）。
