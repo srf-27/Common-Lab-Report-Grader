@@ -36,7 +36,6 @@ experiment_report_grader/
 │   ├── grader.py              判级主流程
 │   │                          · _check_similarity / _remember_report：全文相似度与入库
 │   │                          · _dimension_references / _exemplar_shots：维度 RAG 与 few-shot
-│   │                          · _verify_mechanical：机械判决（verifier → rules 回退）
 │   │                          · assign_items：文本/图片一次性归维度（失败返回空）
 │   │                          · grade_single：注入 → 安全 → 相似度 → 判级 → 归一 → 小计
 │   │                          · finalize_report：终审入 RAG（批量脱敏，一次 LLM 调用）
@@ -44,8 +43,6 @@ experiment_report_grader/
 │   ├── rubric_generator.py    结构化细则生成、单元格补全、偏差校验、校准对比（全部返回结构化 JSON）
 │   ├── rubric_io.py           new_criterion / normalize_weights / compute_subtotals /
 │   │                          check_vague_and_refs / criteria_to_markdown / LEVEL_POINTS
-│   ├── verifier.py            机械判裁判：LLM 生成 verify(text) → AST 白名单校验 → 受限 builtins 执行；
-│   │                          失败回退 verify(text, rules) 正则解释器
 │   ├── agreement.py           Cohen's κ / 二次加权 κ / Krippendorff's α + 混淆计数
 │   └── report_extractor.py    报告解析调度（压缩包递归、按扩展名分派）
 ├── utils/
@@ -109,7 +106,6 @@ frontend/
         │   ├─ detect_injection  → 命中：flagged_injection（不评分）
         │   ├─ check_content_safety → 命中：blocked_safety（不评分）
         │   ├─ _check_similarity → similarity_warnings
-        │   ├─ _verify_mechanical → 机械维度直接定级
         │   ├─ 组装 GRADING_PROMPT（维度 + RAG 参考 + 插件参考 + 正文 8000 字 + 图片说明）
         │   ├─ _parse_json → 失败：llm_failed
         │   └─ _normalize_scores + compute_subtotals
@@ -147,7 +143,7 @@ data/output/sessions/<课程ID>/
 | 加一个学科知识源 | 写/接一个 MCP 服务，在「插件」页登记并挂载；不改代码 |
 | 换向量库 | 实现 `embedding/base.py::VectorStoreBase` 的子类，在 `nodes/grader.py` 的客户端选择处接入 |
 | 换嵌入模型 | 「配置」页 `embedding.backend=openai` + 模型名 |
-| 加机械判决规则类型 | `nodes/verifier.py::_verify_one` 增加分支，并在细则生成提示词里同步允许的 type |
+| 加判级可调用工具 | `utils/calc_tools.py` 加实现与 schema；判级节点在「流程」页挂载 |
 | 改评分提示词 | `nodes/grader.py::GRADING_PROMPT`（保持 JSON 输出契约） |
 | 加页面 | `frontend/src/pages/` 新建页面 + `app.jsx` 的 `Page` 与 `NAV` |
 | 改判级分值 | `nodes/rubric_io.py::LEVEL_POINTS`（导出与一致性同步生效） |

@@ -12,7 +12,7 @@ class _RetryLLM:
     def __init__(self):
         self.calls = 0
 
-    def chat(self, messages, temperature=0.2):
+    def chat(self, messages, temperature=0.2, **kwargs):
         self.calls += 1
         if self.calls == 1:
             return json.dumps({"weight": 10, "levels": {"A": "已填"}}, ensure_ascii=False)
@@ -21,7 +21,7 @@ class _RetryLLM:
 
 
 class _StubbornLLM:
-    def chat(self, messages, temperature=0.2):
+    def chat(self, messages, temperature=0.2, **kwargs):
         return json.dumps({"levels": {"A": "只有 A"}}, ensure_ascii=False)
 
 

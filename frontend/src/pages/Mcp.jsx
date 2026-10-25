@@ -11,7 +11,6 @@ import {
   Field,
   Group,
   IconButton,
-  PageHead,
   Segmented,
   Sheet,
   Spinner,
@@ -19,7 +18,7 @@ import {
 
 const label = (item) => item?.name || item?.uri || item?.title || JSON.stringify(item).slice(0, 60);
 
-export default function Mcp() {
+export default function McpPanel() {
   const { data, error, loading, load } = useData("/api/mcp");
   const [form, setForm] = useState({
     name: "",
@@ -139,15 +138,11 @@ export default function Mcp() {
 
   return (
     <>
-      <PageHead
-        title="插件"
-        sub="登记 MCP 服务并挂载到当前课程；评分前收集一次学科参考，失败时参考为空、评分继续。"
-        actions={
-          <Button icon="refresh" loading={busy === "refresh"} onClick={refresh}>
-            拉取参考
-          </Button>
-        }
-      />
+      <div className="row" style={{ justifyContent: "flex-end", marginBottom: 12 }}>
+        <Button size="sm" icon="refresh" loading={busy === "refresh"} onClick={refresh}>
+          拉取参考
+        </Button>
+      </div>
 
       {error ? (
         <div style={{ marginBottom: 16 }}>

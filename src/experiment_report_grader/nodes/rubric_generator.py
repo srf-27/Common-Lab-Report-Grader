@@ -17,7 +17,6 @@ STRUCT_RUBRIC_PROMPT = """你是评估设计专家。依据评分标准文档生
    等级 A/B/C/D/E，E = 该维度内容未实现/缺失或严重不合格（未做、整卷跑题、抄袭、白卷），不是"比 D 更差"
 4. 报告里通常看不到证据的维度（预习、课堂、考勤、纪律、操作过程、自评、团队合作）标 "non_report": true，其余 false。
    这些维度按大纲原样单列即可，不要与报告维度合并，也不要因为"报告里没有"就不输出。
-5. mechanical 仅当该维度能靠正则/数值比较客观判定时才为 true，并给出 rules；否则 false、rules 为 null
 6. rules 仅支持两种：
    {{"type": "exists", "pattern": "正则"}}
    {{"type": "numeric_compare", "pattern": "含捕获组的正则", "op": "<|<=|>|>=|==", "threshold": 数值}}
@@ -27,7 +26,7 @@ STRUCT_RUBRIC_PROMPT = """你是评估设计专家。依据评分标准文档生
 
 ## 输出（不要代码围栏）
 {{"criteria": [
-  {{"name": "...", "weight": 10, "mechanical": false, "non_report": false, "doc_ref": "文档章节名",
+  {{"name": "...", "weight": 10, "non_report": false, "doc_ref": "文档章节名",
     "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}, "rules": null}}
 ]}}"""
 
@@ -47,10 +46,9 @@ STRUCT_PAIR_PROMPT = """你是评估设计专家。给你两份材料，请只�
 5. A/B/C/D/E 判据必须绑定本实验的具体对象与数据（仪器、试剂、参数、图表、计算式），禁止「整体质量」「是否合理」这类无判据表述；E 仅用于该维度未实现/缺失、整卷跑题、抄袭或白卷。
 6. 报告里通常看不到证据的维度（预习、课堂、考勤、纪律、操作过程、自评、团队合作）标 "non_report": true，其余 false；
    这些维度按大纲原样单列，不要与报告维度合并，也不要因为"报告里没有"就不输出。
-7. mechanical 仅当该维度能靠正则或数值比较客观判定时为 true，rules 只允许 exists / numeric_compare。
-8. ignored 只用于放重复、无法指向大纲条款或明显无效的条目；正常的考核项不要放进去。
+7. ignored 只用于放重复、无法指向大纲条款或明显无效的条目；正常的考核项不要放进去。
 9. 只输出 JSON，不要代码围栏：
-{{"criteria": [{{"name": "...", "weight": 20, "mechanical": false, "non_report": false,
+{{"criteria": [{{"name": "...", "weight": 20, "non_report": false,
   "doc_ref": "大纲章节；实验步骤",
   "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}, "rules": null}}],
  "ignored": [{{"name": "...", "reason": "..."}}]}}"""
@@ -134,7 +132,8 @@ class RubricGenerator:
         os.makedirs(self.output_dir, exist_ok=True)
 
     def _ask(self, prompt):
-        return _extract_json(self.llm.chat([{"role": "user", "content": prompt}], temperature=0.2))
+        return _extract_json(self.llm.chat([{"role": "user", "content": prompt}],
+                                           temperature=0.2, max_tokens=16384))
 
     def _structure(self, data):
         """把模型输出收敛成 criteria + warnings；没有 doc_ref 的维度丢弃。"""

@@ -121,13 +121,16 @@ def test_flow_api_and_config():
         assert all(n["status"] == "pending" for n in payload["nodes"])
         # 非可插拔节点 → 400；白名单外工具被过滤
         assert client.post("/flow/config", json={"node": "rubric", "skills": ["x"]}).status_code == 400
+        # 白名单过滤：calc 通过、未知项剔除；提示词式 skills 已废弃（真正能力走 skill:/mcp:）
         resp = client.post("/flow/config", json={
-            "node": "grade", "tools": ["calc", "hack"], "skills": ["物理必须查有效数字"] + [" filler"] * 8})
+            "node": "grade", "tools": ["calc", "hack", "skill:chem_calc", "mcp:ghost"]})
         assert resp.status_code == 200
         cfg = resp.get_json()["config"]["grade"]
-        assert cfg["tools"] == ["calc"] and len(cfg["skills"]) == 5
+        assert cfg["tools"] == ["calc", "skill:chem_calc"], cfg
+        assert "skills" not in cfg
         # 持久化 + /api/flow 暴露
-        assert client.get("/api/flow").get_json()["config"]["grade"]["tools"] == ["calc"]
+        got = client.get("/api/flow").get_json()["config"]["grade"]["tools"]
+        assert got == ["calc", "skill:chem_calc"]
     finally:
         state_mod.OUTPUT_FOLDER, state_mod.SESSIONS_DIR = real
         state_mod.hydrate_session(state_mod.load_sessions()["current"])

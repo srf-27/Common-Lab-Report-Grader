@@ -12,7 +12,7 @@ import Progress from "./pages/Progress";
 import Results from "./pages/Results";
 import Roster from "./pages/Roster";
 import Calibration from "./pages/Calibration";
-import Mcp from "./pages/Mcp";
+import Flow from "./pages/Flow";
 import Usage from "./pages/Usage";
 import VectorStore from "./pages/VectorStore";
 import Settings from "./pages/Settings";
@@ -32,7 +32,7 @@ const GROUPS = [
     title: "系统",
     items: [
       { to: "/app/calibration", label: "评分校准", icon: "calibration" },
-      { to: "/app/mcp", label: "插件", icon: "mcp", count: (b) => b.mcp.mounted },
+      { to: "/app/flow", label: "流程", icon: "mcp", count: (b) => b.mcp.mounted },
       { to: "/app/usage", label: "用量统计", icon: "usage" },
       { to: "/app/vector", label: "向量库", icon: "database" },
       { to: "/app/settings", label: "配置", icon: "settings" },
@@ -62,7 +62,8 @@ const TITLES = {
   "/app/results": "评分结果",
   "/app/roster": "花名册",
   "/app/calibration": "评分校准",
-  "/app/mcp": "插件",
+  "/app/flow": "流程",
+  "/app/mcp": "流程",
   "/app/usage": "用量统计",
   "/app/vector": "向量库",
   "/app/settings": "配置",
@@ -77,7 +78,8 @@ const ROUTES = {
   "/app/results": Results,
   "/app/roster": Roster,
   "/app/calibration": Calibration,
-  "/app/mcp": Mcp,
+  "/app/flow": Flow,
+  "/app/mcp": Flow,
   "/app/usage": Usage,
   "/app/vector": VectorStore,
   "/app/settings": Settings,
@@ -106,6 +108,11 @@ function resolve(path) {
 
 export default function App() {
   const { boot, fatal, reload, switchSession, createSession } = useApp();
+
+  useEffect(() => {
+    const timer = setInterval(() => reload(), 12000);
+    return () => clearInterval(timer);
+  }, [reload]);
   const path = useRoute();
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -168,7 +175,10 @@ export default function App() {
         <aside className="sidebar">
           <div className="brand">
             <div className="brand-mark" aria-hidden="true">
-              评
+              <svg viewBox="0 0 32 32" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13 4.75h6M13 4.75v7.3L7.55 23.3a2.4 2.4 0 0 0 2.1 3.5h12.7a2.4 2.4 0 0 0 2.1-3.5L19 12.05V4.75" />
+                <path d="M12.3 20.4l2.7 2.7 5.2-5.8" />
+              </svg>
             </div>
             <div style={{ minWidth: 0 }}>
               <div className="brand-title">实验报告评阅</div>

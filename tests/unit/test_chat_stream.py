@@ -15,10 +15,10 @@ class FakeStreamClient:
     def __init__(self, events):
         self.events = events
 
-    def chat_stream(self, messages, temperature=0.3):
+    def chat_stream(self, messages, temperature=0.3, max_tokens=None):
         yield from self.events
 
-    def chat(self, messages, temperature=0.3, retries=2):
+    def chat(self, messages, temperature=0.3, retries=2, **kwargs):
         return "fallback"
 
 
@@ -131,7 +131,7 @@ def test_tap_falls_back_when_stream_fails():
             raise RuntimeError("stream broken")
             yield  # pragma: no cover
 
-        def chat(self, messages, temperature=0.3, retries=2):
+        def chat(self, messages, temperature=0.3, retries=2, **kwargs):
             return "fallback"
 
     tmp = tempfile.mkdtemp(prefix="erg_fb_")

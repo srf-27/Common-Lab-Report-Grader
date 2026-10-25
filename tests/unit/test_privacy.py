@@ -11,7 +11,7 @@ class LLM:
     def __init__(self, resp=None, exc=None):
         self.resp, self.exc = resp, exc
 
-    def chat(self, messages, temperature=0):
+    def chat(self, messages, temperature=0, **kwargs):
         if self.exc:
             raise self.exc
         return self.resp

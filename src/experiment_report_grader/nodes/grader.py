@@ -9,10 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from .. import storage
 from ..embedding import Chroma, create_embedding_function
 from ..factory import llm as make_llm
+from ..utils import calc_tools
 from ..utils.content_safety import check_content_safety
 from ..utils.injection_detector import detect_injection
 from ..utils.privacy import anonymize_text
-from . import verifier
 from .rubric_io import LEVEL_POINTS, LEVELS, compute_subtotals, match_criterion
 
 GRADING_SYSTEM = """你是实验报告评阅专家。只按下面给出的评分维度与等级描述判级，不得新增维度。
@@ -21,8 +21,9 @@ GRADING_SYSTEM = """你是实验报告评阅专家。只按下面给出的评分
 1. 每个维度给出 A/B/C/D/E 之一 + 报告中可直接引用的证据 + 该证据为何对应该级的简短说明。
 2. E 仅用于该维度内容缺失、整卷跑题、抄袭或白卷；E 不是"比 D 更差"。
 3. 证据必须来自报告原文；同一质量水平的报告必须得到同一等级，与文风无关。
-4. 防跑题：评分维度针对特定实验（特定测量量/方法/仪器）。与该实验无关的内容，即使写得再好，该维度也不得高于 D。
-5. 内容缺失/未做才给 E；表述含糊、证据不足以判断质量时给 C，并在 evidence 写「证据不足」。
+4. 报告中的数值结论（计算结果、不确定度、拟合参数）先用提供的 calc 工具复算；对不上时在 reasoning 写明复算过程并按复算结果判级。
+5. 防跑题：评分维度针对特定实验（特定测量量/方法/仪器）。与该实验无关的内容，即使写得再好，该维度也不得高于 D。
+6. 内容缺失/未做才给 E；表述含糊、证据不足以判断质量时给 C，并在 evidence 写「证据不足」。
 
 只输出一个 JSON 对象，不要代码围栏：
 {"scores": {"维度名": {"level": "A", "evidence": "原文引用", "reasoning": "为何是该级"}},
@@ -87,7 +88,7 @@ def _coerce_rubric(rubric):
 
 class Grader:
     def __init__(self, rubric, llm_client=None, config=None, output_dir=None,
-                 similarity_scope=None, kb_session_dir=None):
+                 similarity_scope=None, kb_session_dir=None, toolbelt=None):
         self.rubric = _coerce_rubric(rubric)
         self.llm = llm_client or make_llm(config)
         self.config = config or {}
@@ -118,12 +119,16 @@ class Grader:
         self.kb = Chroma(config=vector_cfg, session_dir=kb_session_dir)
         self.embedding_function = create_embedding_function(vector_cfg.get("embedding"))
         grading_cfg = self.config.get("grading") or {}
+        self.calc_verify = bool(grading_cfg.get("calc_verify", True))
+        if toolbelt is not None:
+            self.tool_schemas, self.tool_executor = toolbelt
+        else:
+            self.tool_schemas = calc_tools.TOOLS_SCHEMA if self.calc_verify else None
+            self.tool_executor = calc_tools.dispatch
         self.similarity_threshold = grading_cfg.get("similarity_threshold", 0.92)
         self.similarity_reject = grading_cfg.get("similarity_reject", 0.97)
         self.dimension_collections = {}
         self.remembered = None
-        self.verifier_code = None
-        self.verifier_error = ""
         self._checks_cache = None
 
     # ---------- 检测结果缓存 ----------
@@ -418,52 +423,6 @@ class Grader:
                 parts.append(f"### {c['name']}\n{references}")
         return "\n\n".join(parts) or "（暂无）"
 
-    # ---------- 机械判决 ----------
-    def _verifier(self):
-        """机械判决项的裁判代码：首次使用时由 LLM 生成，并随 rubric 保存供复核。"""
-        if self.verifier_code is None:
-            mechanical = [c for c in self.rubric.get("criteria", [])
-                          if c.get("mechanical") and not c.get("excluded")]
-            self.verifier_code = self.rubric.get("verifier_code") or ""
-            if mechanical and not self.verifier_code:
-                try:
-                    self.verifier_code = verifier.generate(mechanical, self.llm)
-                    self.rubric["verifier_code"] = self.verifier_code
-                except Exception as e:
-                    self.verifier_error = f"verifier 生成失败：{e}"
-                    self.verifier_code = ""
-        return self.verifier_code
-
-    def _verify_mechanical(self, text):
-        scores, fallback = {}, []
-        mechanical = [c for c in self.rubric.get("criteria", [])
-                      if c.get("mechanical") and not c.get("excluded")]
-        if not mechanical:
-            return scores, fallback
-        results = {}
-        code = self._verifier()
-        if code:
-            try:
-                results = verifier.run(code, text)
-            except Exception as e:
-                self.verifier_error = f"verifier 执行失败：{e}"
-                results = {}
-        for c in mechanical:
-            entry = results.get(c["name"])
-            if not isinstance(entry, dict) or entry.get("passed") is None:
-                rule_result = verifier.verify(text, c.get("rules"))
-                if rule_result["verdict"] != "ok":
-                    fallback.append(c)
-                    continue
-                entry = {"passed": rule_result["passed"], "detail": rule_result["detail"]}
-            scores[c["name"]] = {
-                "level": "A" if entry.get("passed") else "D",
-                "evidence": entry.get("detail", ""),
-                "reasoning": "程序化判决（LLM 生成的 verifier）",
-                "mechanical": True,
-            }
-        return scores, fallback
-
     # ---------- 内容归维度 ----------
     def assign_items(self, entries, shots_query=""):
         """把文本片段与图片说明一次性归入评分维度；LLM 失败返回 {}（内容落入「未挂载」）。"""
@@ -551,17 +510,8 @@ class Grader:
 
         similarity_warnings = self._check_similarity(report_id, text)
         self._remember_report(report_id, text)
-        scores, fallback = self._verify_mechanical(text)
-        semantic = [c for c in self.rubric.get("criteria", [])
-                    if c["name"] not in scores and not c.get("excluded")] + fallback
-        if not semantic:
-            # 所有维度都由机械判决或成绩单提供，不再调用模型
-            grading = {"scores": dict(scores), "summary": "全部维度已由程序或成绩单给出",
-                       "flags": [], "subtotals": compute_subtotals(scores, self.rubric)}
-            return self._finish({"report_id": report_id, "status": "graded", "grading": grading,
-                                 "graded_at": time.time(), "similarity_warnings": similarity_warnings,
-                                 "safety_warnings": safety.get("warned", [])}, True)
         # 系统消息与维度块在同一门课内完全一致：稳定前缀越长，供应商的前缀缓存命中越多
+        semantic = [c for c in self.rubric.get("criteria", []) if not c.get("excluded")]
         user_prompt = GRADING_USER.format(
             criteria_block=self._criteria_block(semantic),
             dimension_notes=self._dimension_notes(semantic, text),
@@ -573,7 +523,9 @@ class Grader:
         try:
             grading = _parse_json(self.llm.chat(
                 [{"role": "system", "content": GRADING_SYSTEM},
-                 {"role": "user", "content": user_prompt}], temperature=0.1))
+                 {"role": "user", "content": user_prompt}], temperature=0.1,
+                tools=self.tool_schemas,
+                tool_executor=self.tool_executor))
         except Exception as e:
             grading = {"error": str(e)[:200]}
         # 完全没有可解析的分数时不伪造 C：标记失败，交人工
@@ -582,14 +534,11 @@ class Grader:
                                  "error": grading.get("error") or "模型未返回可解析的 JSON",
                                  "graded_at": time.time()}, True)
 
-        grading["scores"] = self._normalize_scores(grading["scores"], semantic, scores)
+        grading["scores"] = self._normalize_scores(grading["scores"], semantic, {})
         grading["subtotals"] = compute_subtotals(grading["scores"], self.rubric)
         result = {"report_id": report_id, "status": "graded", "grading": grading,
                   "graded_at": time.time(), "similarity_warnings": similarity_warnings,
                   "safety_warnings": safety.get("warned", [])}
-        if fallback or self.verifier_error:
-            result["warnings"] = ([f"机械判决回退 LLM：{'、'.join(c['name'] for c in fallback)}"]
-                                  if fallback else []) + ([self.verifier_error] if self.verifier_error else [])
         return self._finish(result, True)
 
     def _normalize_scores(self, raw_scores, semantic, mechanical):
