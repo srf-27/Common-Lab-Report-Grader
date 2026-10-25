@@ -77,7 +77,7 @@ class ReportExtractor:
                 return {"status": "skipped", "file": filepath,
                         "reason": f"Unsupported format: {ext}"}
         except Exception as e:
-            local_error = str(e)  # 本地解析失败 → 尝试 markitdown 兜底
+            local_error = str(e)
 
         if meta is None:
             # 本地不支持或失败：markitdown MCP 兜底；不可用时按原行为返回 skipped/error

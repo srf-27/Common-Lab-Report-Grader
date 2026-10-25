@@ -211,7 +211,7 @@ def session_remove():
     return redirect("/app/workbench")
 
 
-# ---------------------------------------------------------------- HeroUI 预览（React islands）
+# ---------------------------------------------------------------- SPA 页面与引导数据
 UI_DIST = os.path.join(os.path.dirname(__file__), "static", "ui")
 
 
@@ -384,7 +384,6 @@ def process_criteria():
             warnings = rubric_json.pop("warnings", [])
             task_update(t, stage="保存评分细则")
             # 磁盘写入无条件进行（落捕获的会话目录）；内存只在仍是当前会话时更新
-            # _save_rubric 内部会重置下游并作废校准样本的模型判级
             _save_rubric(rubric_json, doc_text, experiment_text, base=session_path)
             if state.get("session") == sid:
                 state["criteria_doc"] = doc_text
@@ -903,7 +902,7 @@ def rubric_table_save():
     state["rubric_json"] = rubric_json
     state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
     state["rubric_warnings"] = []
-    _save_rubric(rubric_json)  # 内部重置下游并作废校准样本模型判级
+    _save_rubric(rubric_json)
     return jsonify({"ok": True})
 
 
