@@ -54,6 +54,9 @@ export default function Rubric() {
   const [mode, setMode] = useState("single");
   const [externalFile, setExternalFile] = useState(null);
   const [externalBusy, setExternalBusy] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(null); // null | "save" | "generate"
+  const [deletingPilot, setDeletingPilot] = useState(null);
+  const [clearingExternal, setClearingExternal] = useState(false);
   const [pilotFiles, setPilotFiles] = useState([]);
   const [pilotLevels, setPilotLevels] = useState({});
   const [pilotBusy, setPilotBusy] = useState(false);
@@ -255,15 +258,16 @@ export default function Rubric() {
       list.map((item, i) => (i === index ? { ...item, levels: { ...item.levels, [level]: value } } : item))
     );
 
-  const generate = async () => {
+  const generate = async (confirmed = false) => {
     if (!file) return toast(mode === "pair" ? "请先选择课程大纲" : "请先选择评分标准文件", "danger");
     if (mode === "pair" && !flowFile) return toast("请再选择实验流程或实验模板", "danger");
     setBusy(true);
     try {
       const fields = { criteria_file: file };
       if (mode === "pair") fields.experiment_file = flowFile;
+      if (confirmed) fields.confirm_reset = "1";
       await postForm("/upload_criteria", fields);
-      await postForm("/process_criteria", {});
+      await postForm("/process_criteria", confirmed ? { confirm_reset: "1" } : {});
       const next = await getJSON("/task_status");
       if (next?.kind !== "criteria" || next.status !== "running") {
         toast("没能开始生成：文件可能没有可读文本", "danger");
@@ -275,6 +279,10 @@ export default function Rubric() {
       setFlowFile(null);
       toast(mode === "pair" ? "已开始生成，完成后会自动刷新" : "已开始生成细则，完成后会自动刷新", "ok");
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.data?.needReset) {
+        setConfirmReset("generate"); // 重新生成会清除下游，需二次确认
+        return;
+      }
       toast(errorText(err), "danger");
     } finally {
       setBusy(false);
@@ -298,7 +306,7 @@ export default function Rubric() {
     }
   };
 
-  const save = async (force = false) => {
+  const save = async (force = false, confirmReset = false) => {
     if (!draft.length) return toast("至少保留一个评分维度", "danger");
     if (draft.some((item) => !String(item.name).trim())) return toast("存在未命名维度", "danger");
     setBusy(true);
@@ -315,6 +323,7 @@ export default function Rubric() {
           rules: item.rules || null,
         })),
         force,
+        confirm_reset: confirmReset,
       });
       setWarnings(null);
       await load();
@@ -323,6 +332,8 @@ export default function Rubric() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.data?.warnings) {
         setWarnings(err.data.warnings);
+      } else if (err instanceof ApiError && err.status === 409 && err.data?.needReset) {
+        setConfirmReset("save"); // 保存会清除下游，需二次确认
       } else {
         toast(errorText(err), "danger");
       }
@@ -558,6 +569,27 @@ export default function Rubric() {
               }}
             >
               清除
+            </Button>
+          ) : null}
+          {data?.hasUpload ? (
+            <Button
+              variant="plain"
+              icon="trash"
+              disabled={busy || polling}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const result = await postJSON("/criteria/clear", {});
+                  toast(`已清除 ${result.removed} 个已上传的标准文件`, "ok");
+                  await load();
+                } catch (err) {
+                  toast(errorText(err), "danger");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              清除已上传的标准文件
             </Button>
           ) : null}
           <span className="row-sub" style={{ marginLeft: "auto" }}>
@@ -818,6 +850,9 @@ export default function Rubric() {
                   <Button size="sm" icon="external" onClick={() => openPilotText(report)}>
                     原文
                   </Button>
+                  <Button size="sm" icon="trash" onClick={() => setDeletingPilot(report)}>
+                    删除
+                  </Button>
                 </span>
               }
             >
@@ -973,6 +1008,16 @@ export default function Rubric() {
               >
                 导入并合并
               </Button>
+              {data?.external?.file ? (
+                <Button
+                  variant="plain"
+                  icon="trash"
+                  disabled={externalBusy}
+                  onClick={() => setClearingExternal(true)}
+                >
+                  清除成绩单
+                </Button>
+              ) : null}
               {externalFile ? (
                 <Button variant="plain" onClick={() => setExternalFile(null)}>
                   清除
@@ -1050,6 +1095,92 @@ export default function Rubric() {
       >
         {readerBusy ? <Spinner label="读取原文…" /> : <Prose text={readerText} />}
       </Sheet>
+
+      <Sheet
+        open={Boolean(confirmReset)}
+        title={confirmReset === "generate" ? "重新生成细则？" : "保存细则？"}
+        text="细则变化后，已提取的报告、评分结果与向量库会全部删除（上传的原件保留，重新点「处理」即可）。此操作无法恢复。"
+        onClose={() => setConfirmReset(null)}
+        footer={
+          <>
+            <Button onClick={() => setConfirmReset(null)}>取消</Button>
+            <Button
+              variant="destructive"
+              loading={busy}
+              onClick={async () => {
+                const action = confirmReset;
+                setConfirmReset(null);
+                if (action === "generate") await generate(true);
+                else await save(false, true);
+              }}
+            >
+              确认并清除
+            </Button>
+          </>
+        }
+      />
+
+      <Sheet
+        open={Boolean(deletingPilot)}
+        title={`删除样本「${deletingPilot?.filename || ""}」？`}
+        text="会删除这份校准样本的解析结果与上传原件，不影响其他样本。"
+        onClose={() => setDeletingPilot(null)}
+        footer={
+          <>
+            <Button onClick={() => setDeletingPilot(null)}>取消</Button>
+            <Button
+              variant="destructive"
+              loading={pilotBusy}
+              onClick={async () => {
+                setPilotBusy(true);
+                try {
+                  await postJSON("/pilot/delete", { filename: deletingPilot.filename });
+                  toast(`已删除样本 ${deletingPilot.filename}`, "ok");
+                  setDeletingPilot(null);
+                  await loadPilot();
+                } catch (err) {
+                  toast(errorText(err), "danger");
+                } finally {
+                  setPilotBusy(false);
+                }
+              }}
+            >
+              删除
+            </Button>
+          </>
+        }
+      />
+
+      <Sheet
+        open={clearingExternal}
+        title="清除课外成绩单？"
+        text="会删除成绩单文件，并把已并入结果的课外维度分数回滚、重算小计；需要时重新上传即可。"
+        onClose={() => setClearingExternal(false)}
+        footer={
+          <>
+            <Button onClick={() => setClearingExternal(false)}>取消</Button>
+            <Button
+              variant="destructive"
+              loading={externalBusy}
+              onClick={async () => {
+                setExternalBusy(true);
+                try {
+                  await postJSON("/external/clear", {});
+                  setClearingExternal(false);
+                  toast("成绩单已清除，分数已回滚", "ok");
+                  await load();
+                } catch (err) {
+                  toast(errorText(err), "danger");
+                } finally {
+                  setExternalBusy(false);
+                }
+              }}
+            >
+              清除
+            </Button>
+          </>
+        }
+      />
     </>
   );
 }

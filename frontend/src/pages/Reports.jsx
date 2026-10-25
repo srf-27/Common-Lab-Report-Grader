@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { errorText, getJSON, postEmpty, postForm } from "../lib/api";
+import { errorText, getJSON, postEmpty, postForm, postJSON } from "../lib/api";
 import { studentText } from "../lib/format";
 import { useData, usePoll } from "../lib/hooks";
 import { Link } from "../lib/router";
@@ -39,6 +39,7 @@ export default function Reports() {
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState(null);
   const [student, setStudent] = useState({});
+  const [deleting, setDeleting] = useState(null);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -325,6 +326,11 @@ export default function Reports() {
             ) : (
               <IconButton icon="external" label="原文不在工作目录" disabled />
             )}
+            <IconButton
+              icon="trash"
+              label={`删除 ${item.filename}`}
+              onClick={() => setDeleting(item)}
+            />
             <Icon name="chevronRight" size={15} className="row-chevron" />
           </div>
         ))}
@@ -411,6 +417,37 @@ export default function Reports() {
           ))}
         </div>
       </Sheet>
+
+      <Sheet
+        open={Boolean(deleting)}
+        title={`删除「${deleting?.filename || ""}」？`}
+        text="会一并删除它的提取目录、上传原件、评分结果、向量记录与终审记录，无法恢复。"
+        onClose={() => setDeleting(null)}
+        footer={
+          <>
+            <Button onClick={() => setDeleting(null)}>取消</Button>
+            <Button
+              variant="destructive"
+              loading={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await postJSON(`/reports/delete/${encodeURIComponent(deleting.filename)}`, {});
+                  toast(`已删除 ${deleting.filename}`, "ok");
+                  setDeleting(null);
+                  await load();
+                } catch (err) {
+                  toast(errorText(err), "danger");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              删除
+            </Button>
+          </>
+        }
+      />
     </>
   );
 }

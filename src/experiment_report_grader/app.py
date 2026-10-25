@@ -293,6 +293,23 @@ def upload_criteria():
     return jsonify({"ok": True, "filename": name, "experiment": experiment_name})
 
 
+@app.route("/criteria/clear", methods=["POST"])
+def criteria_clear():
+    """删除已上传的标准/实验流程文件（不影响已生成的细则本身）。"""
+    upload_dir = session_sub("uploads")
+    removed = 0
+    for name in os.listdir(upload_dir):
+        if name.startswith(("criteria_", "experiment_")):
+            try:
+                os.remove(os.path.join(upload_dir, name))
+                removed += 1
+            except OSError:
+                pass
+    state.pop("criteria_upload", None)
+    state.pop("criteria_experiment", None)
+    return jsonify({"ok": True, "removed": removed})
+
+
 @app.route("/process_criteria", methods=["POST"])
 def process_criteria():
     filepath = state.get("criteria_upload")
@@ -306,6 +323,9 @@ def process_criteria():
         state["criteria_upload"] = filepath
     if _busy():
         return redirect("/app/workbench")
+    if request.form.get("confirm_reset") != "1" and _has_downstream():
+        return jsonify({"needReset": True,
+                        "error": "重新生成细则会清除已提取的报告、评分结果与向量库（上传原件保留），请确认后重试"}), 409
     # 请求线程内捕获会话与路径，线程绝不读 state / 不调 session_dir()
     sid = state["session"]
     session_path = session_dir()
@@ -339,13 +359,8 @@ def process_criteria():
             warnings = rubric_json.pop("warnings", [])
             task_update(t, stage="保存评分细则")
             # 磁盘写入无条件进行（落捕获的会话目录）；内存只在仍是当前会话时更新
+            # _save_rubric 内部会重置下游并作废校准样本的模型判级
             _save_rubric(rubric_json, doc_text, experiment_text, base=session_path)
-            if os.path.exists(_pilot_path(session_path)):
-                pilot = _load_pilot(session_path)
-                for entry in pilot["reports"]:
-                    entry["ai"] = {}
-                    entry["status"] = "pending"
-                _save_pilot(pilot, session_path)
             if state.get("session") == sid:
                 state["criteria_doc"] = doc_text
                 state["experiment_doc"] = experiment_text
@@ -391,7 +406,11 @@ def _sync_dimension_collections(names):
 
 
 def _save_rubric(rubric_json, doc_text=None, experiment_text=None, base=None):
-    """base 显式传入时写该会话目录（后台线程用），否则写当前会话。"""
+    """保存细则并重置下游：细则一变，提取/评分/向量/终审全部作废清除。
+
+    保留上传原件（uploads/，重新点「处理」即可）与课外成绩单。
+    base 显式传入时作用于该会话目录（后台线程用），否则当前会话。
+    """
     base = base or session_dir()
     rubrics_dir = os.path.join(base, "rubrics")
     os.makedirs(rubrics_dir, exist_ok=True)
@@ -406,6 +425,61 @@ def _save_rubric(rubric_json, doc_text=None, experiment_text=None, base=None):
             storage.write_text(experiment_path, experiment_text)
         else:
             storage.remove(experiment_path)
+    # 校准样本的模型判级基于旧细则，一并作废（教师手填等级保留）
+    if storage.exists(_pilot_path(base)):
+        pilot = _load_pilot(base)
+        for entry in pilot["reports"]:
+            entry["ai"] = {}
+            entry["status"] = "pending"
+        _save_pilot(pilot, base)
+    _reset_downstream(base)
+
+
+def _has_downstream():
+    """是否已有基于当前细则产生的数据——保存/重新生成细则将清除它们，需用户二次确认。"""
+    if state.get("extracted_reports"):
+        return True
+    if state.get("grader") and state["grader"].results:
+        return True
+    if _approved_ids() or state.get("corrections"):
+        return True
+    try:
+        store = Chroma(config=(state.get("config") or {}).get("vector_store") or {},
+                       session_dir=session_dir(), create=False)
+        return any(collection.count() for collection in store.client.list_collections())
+    except Exception:
+        return False
+
+
+def _clear_session_vectors(base):
+    """删除会话的全部 Chroma collections（与「向量库」页清空同款逻辑）。"""
+    try:
+        store = Chroma(config=(state.get("config") or {}).get("vector_store") or {},
+                       session_dir=base, create=False)
+        for collection in store.client.list_collections():
+            store.client.delete_collection(collection.name)
+    except Exception:
+        pass
+
+
+def _reset_downstream(base):
+    """细则已变：清除评分结果、提取报告、向量库、终审/重评记录与校准工作区。"""
+    sid = os.path.basename(base)
+    _clear_session_vectors(base)
+    if state.get("session") == sid:
+        if state.get("grader") is not None:
+            state["grader"].invalidate_vector_store()
+        state["grader"] = None
+        state["extracted_reports"] = []
+        state["report_uploads"] = []
+        state["approved_ids"] = set()
+        state["corrections"] = {}
+        state["calibration"] = None
+    storage.write_json(os.path.join(base, "approved.json"), [])
+    storage.write_json(os.path.join(base, "corrections.json"), {})
+    storage.remove(os.path.join(base, "calibration_workspace.json"))
+    for sub in ("grading", "reports", "kb_db", "calibration_kb"):
+        storage.remove_tree(os.path.join(base, sub))
 
 
 def _apply_external():
@@ -514,6 +588,29 @@ def rubric_external_upload():
     _export_all()
     return jsonify({"ok": True, "file": data["file"], "applied": applied,
                     "dimensions": {name: len(values) for name, values in scores.items()}})
+
+
+@app.route("/external/clear", methods=["POST"])
+def external_clear():
+    """清除课外成绩单：删文件、清状态，并把已并入结果的 external 分数回滚、重算小计。"""
+    if _busy():
+        return jsonify({"error": "有任务正在进行，稍后再清除"}), 409
+    if not state.get("external"):
+        return jsonify({"ok": True, "cleared": 0})
+    storage.remove(external_scores.path_for(session_dir()))
+    state["external"] = {}
+    grader = state.get("grader")
+    rubric = state.get("rubric_json")
+    if grader is not None and rubric:
+        for result in grader.results:
+            grading = result.get("grading") or {}
+            scores = grading.get("scores")
+            if isinstance(scores, dict) and any((s or {}).get("external") for s in scores.values()):
+                grading["scores"] = {n: s for n, s in scores.items() if not (s or {}).get("external")}
+                grading["subtotals"] = rubric_io.compute_subtotals(grading["scores"], rubric)
+                result["grading"] = grading
+        _export_all()
+    return jsonify({"ok": True, "cleared": 1})
 
 
 # ---------------------------------------------------------------- 样本校准
@@ -641,6 +738,27 @@ def pilot_teacher():
     return jsonify({"ok": True})
 
 
+@app.route("/pilot/delete", methods=["POST"])
+def pilot_delete():
+    """删除单份校准样本：pilot.json 条目、pilot/reports 提取目录、pilot/uploads 原件。"""
+    payload = request.get_json(silent=True) or {}
+    filename = str(payload.get("filename", "")).strip()
+    data = _load_pilot()
+    entry = next((e for e in data["reports"] if e.get("filename") == filename), None)
+    if entry is None:
+        return jsonify({"error": "样本不存在"}), 404
+    data["reports"] = [e for e in data["reports"] if e.get("filename") != filename]
+    _save_pilot(data)
+    base = session_dir()
+    if entry.get("text"):
+        storage.remove_tree(os.path.dirname(os.path.join(base, entry["text"])))
+    try:
+        os.remove(os.path.join(base, "pilot", "uploads", filename))
+    except OSError:
+        pass
+    return jsonify({"ok": True, "deleted": filename})
+
+
 @app.route("/pilot/text/<path:filename>")
 def pilot_text(filename):
     data = _load_pilot()
@@ -732,12 +850,17 @@ def rubric_gen_cell():
 
 @app.route("/rubric_table_save", methods=["POST"])
 def rubric_table_save():
+    if _busy():
+        return jsonify({"error": "评分进行中，暂不能修改细则"}), 409
     data = request.get_json(silent=True) or {}
     criteria = [c for c in (data.get("criteria") or []) if not c.get("_deleted")]
     if not criteria:
         return jsonify({"error": "至少保留一个评分维度"}), 400
     if any(not str(c.get("name", "")).strip() for c in criteria):
         return jsonify({"error": "存在未命名维度，请填写维度名称"}), 400
+    if not data.get("confirm_reset") and _has_downstream():
+        return jsonify({"needReset": True,
+                        "error": "保存细则会清除已提取的报告、评分结果与向量库（上传原件保留），请确认后重试"}), 409
     warnings = rubric_io.check_vague_and_refs(criteria)
     if warnings and not data.get("force"):
         return jsonify({"warnings": warnings}), 409
@@ -755,9 +878,7 @@ def rubric_table_save():
     state["rubric_json"] = rubric_json
     state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
     state["rubric_warnings"] = []
-    _save_rubric(rubric_json)
-    if os.path.exists(_pilot_path()):
-        _save_pilot(_load_pilot())
+    _save_rubric(rubric_json)  # 内部重置下游并作废校准样本模型判级
     return jsonify({"ok": True})
 
 
@@ -892,6 +1013,38 @@ def process_reports():
 def _save_meta(entry):
     storage.write_json(os.path.join(entry["meta"]["output_dir"], "meta.json"),
                        entry["meta"], indent=2)
+
+
+@app.route("/reports/delete/<path:filename>", methods=["POST"])
+def reports_delete(filename):
+    """删除单份报告及其全部衍生物：提取目录、上传原件、评分结果、向量记录、终审/重评记录。"""
+    if _busy():
+        return jsonify({"error": "有任务正在进行，稍后再删除"}), 409
+    entry = _find_entry(filename)
+    if entry is None:
+        return jsonify({"error": "报告不存在"}), 404
+    grader = state.get("grader")
+    if grader is not None:
+        grader.results = [r for r in grader.results if r["report_id"] != filename]
+        grader.export_results()
+        grader._purge_report_vectors(filename)
+    state["approved_ids"] = _approved_ids() - {filename}
+    save_approved(state["approved_ids"])
+    if state["corrections"].pop(filename, None) is not None:
+        storage.write_json(os.path.join(session_dir(), "corrections.json"), state["corrections"])
+    storage.remove_tree(entry["meta"]["output_dir"])
+    origin = _origin_path(filename)
+    if origin:
+        try:
+            os.remove(origin)
+        except OSError:
+            pass
+    state["extracted_reports"] = [r for r in state["extracted_reports"]
+                                  if r["meta"]["filename"] != filename]
+    state["report_uploads"] = [n for n in (state.get("report_uploads") or []) if n != filename]
+    if grader is not None:
+        _export_all()
+    return jsonify({"ok": True, "deleted": filename})
 
 
 def _doc_author(entry):
@@ -1359,17 +1512,18 @@ def _grade_one(grader, entry, references="", corrections=None):
 
 
 def _grading_workers():
-    """评分并发数：config 的 grading.workers 优先（网页可配），其次环境变量，默认 3；一律 clamp 到 1..8。"""
+    """评分并发数：环境变量 ERG_GRADING_WORKERS 显式覆盖，其次 config 的 grading.workers
+    （网页可配），默认 3；一律 clamp 到 1..8。"""
     def clamp(value):
         try:
             return max(1, min(8, int(value)))
         except (TypeError, ValueError):
             return None
 
-    workers = clamp((state.get("config") or {}).get("grading", {}).get("workers"))
+    workers = clamp(os.environ.get("ERG_GRADING_WORKERS"))
     if workers:
         return workers
-    return clamp(os.environ.get("ERG_GRADING_WORKERS")) or 3
+    return clamp((state.get("config") or {}).get("grading", {}).get("workers")) or 3
 
 
 def _grade_targets(grader, targets, references, status, corrections=None):
