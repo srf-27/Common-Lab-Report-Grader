@@ -103,13 +103,14 @@ class Grader:
             env_workers = int(os.environ.get("ERG_GRADING_WORKERS", "3"))
         except ValueError:
             env_workers = 3
-        # config 的 grading.workers（网页可配）优先于环境变量；一律 clamp 1..8
+        # 环境变量显式覆盖 > config 的 grading.workers（网页可配）；一律 clamp 1..8
         cfg_workers = (config or {}).get("grading", {}).get("workers")
         try:
             cfg_workers = max(1, min(8, int(cfg_workers))) if cfg_workers is not None else None
         except (TypeError, ValueError):
             cfg_workers = None
-        self.parallel_checks = (cfg_workers or env_workers) > 1
+        self.parallel_checks = (env_workers if os.environ.get("ERG_GRADING_WORKERS")
+                                else (cfg_workers or env_workers)) > 1
         self.session_scope = similarity_scope or "default"
         vector_cfg = self.config.get("vector_store") or {}
         self._vector_cfg = vector_cfg
@@ -179,6 +180,24 @@ class Grader:
         self.kb = None
         self.dimension_collections = {}
         self.remembered = None
+
+    def _purge_report_vectors(self, report_id):
+        """删除单份报告在各向量库中的记录（全文库 + 各维度库），失败静默（删除操作不因向量库中断）。"""
+        try:
+            self._ensure_kb()
+            with self._kb_lock:
+                self.kb.collection.delete(where={"report_id": report_id})
+                self.remembered = None
+                for collection in self.kb.client.list_collections():
+                    if not collection.name.startswith("dim_"):
+                        continue
+                    try:
+                        collection.delete(where={"report_id": report_id})
+                    except Exception:
+                        continue
+                self.dimension_collections = {}
+        except Exception:
+            pass
 
     def _query_vector(self, text):
         """同一份正文的 query embedding 只算一次，维度参考不再逐维重新嵌入。"""

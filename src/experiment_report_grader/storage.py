@@ -15,6 +15,7 @@
 
 import json
 import os
+import shutil
 import threading
 
 _LOCK = threading.RLock()
@@ -252,6 +253,22 @@ def remove(path):
         os.remove(path)  # 镜像与 PG 双清，避免陈旧文件在读取回退时复活
     except OSError:
         pass
+
+
+def remove_tree(path):
+    """删除会话目录下的子树（如 reports/、kb_db/）：PG 删 key 前缀行，文件 rmtree。"""
+    if _backend == "pg":
+        resolved = _resolve(path)
+        if resolved:
+            sid, key = resolved
+            try:
+                with _LOCK:
+                    with _pg_conn.cursor() as cur:
+                        cur.execute("DELETE FROM session_kv WHERE session_id = %s AND key LIKE %s",
+                                    (sid, key + "%"))
+            except Exception as e:
+                _degrade(e)
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def backend_name():
