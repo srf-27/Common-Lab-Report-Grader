@@ -115,7 +115,7 @@ class Grader:
         vector_cfg = self.config.get("vector_store") or {}
         self._vector_cfg = vector_cfg
         self._kb_session_dir = kb_session_dir
-        self.kb = Chroma(config=vector_cfg, session_dir=kb_session_dir)  # 全文相似度库
+        self.kb = Chroma(config=vector_cfg, session_dir=kb_session_dir)
         self.embedding_function = create_embedding_function(vector_cfg.get("embedding"))
         grading_cfg = self.config.get("grading") or {}
         self.similarity_threshold = grading_cfg.get("similarity_threshold", 0.92)
@@ -453,7 +453,7 @@ class Grader:
             if not isinstance(entry, dict) or entry.get("passed") is None:
                 rule_result = verifier.verify(text, c.get("rules"))
                 if rule_result["verdict"] != "ok":
-                    fallback.append(c)  # 无人可判 → 交回 LLM
+                    fallback.append(c)
                     continue
                 entry = {"passed": rule_result["passed"], "detail": rule_result["detail"]}
             scores[c["name"]] = {

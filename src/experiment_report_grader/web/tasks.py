@@ -11,7 +11,7 @@ import time
 from .. import storage
 
 task_lock = threading.Lock()
-RUNNING_TASKS = {}  # sid -> task dict
+RUNNING_TASKS = {}
 
 
 def _snapshot(sid, t):

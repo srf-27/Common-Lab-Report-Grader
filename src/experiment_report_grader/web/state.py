@@ -1,6 +1,5 @@
 """课程会话与全局运行状态：目录、索引、审批记录、MCP 挂载、会话补水。"""
 
-import json
 import os
 import re
 import threading

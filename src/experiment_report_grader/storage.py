@@ -19,7 +19,7 @@ import shutil
 import threading
 
 _LOCK = threading.RLock()
-_backend = "file"       # "file" | "pg"
+_backend = "file"
 _pg_conn = None
 _pg_broken_reason = ""
 

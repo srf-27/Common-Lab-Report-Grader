@@ -274,8 +274,7 @@ def payload(session_dir, days=1, model=None):
 class MeteredLLM(LLMClient):
     """记录用量后再返回原文，行为与 LLMClient 完全一致。
 
-    shortcut: _call_openai 复制自 llm_client.py，仅多出 usage 记录；
-    该文件若调整请求参数，这里要同步。
+    shortcut: _call_openai 与 llm_client.py 各存一份，llm_client 改请求参数时这里要同步。
     """
 
     def __init__(self, config=None):
