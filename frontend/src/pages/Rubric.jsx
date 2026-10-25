@@ -432,13 +432,43 @@ export default function Rubric() {
             }
           >
             <div className="list-row" style={{ display: "block" }}>
-              <Progress value={progress} tone={task.status === "error" ? "danger" : undefined} />
-              <div className="spread" style={{ marginTop: 8 }}>
-                <span className="row-sub" style={{ whiteSpace: "normal" }}>
-                  {task.detail || task.stage || "准备中"}
-                </span>
-                <span className="t-footnote tnum c-secondary">{progress}%</span>
-              </div>
+              {task.mode === "stage" ? (
+                /* 单次长 LLM 调用没有可如实量化的百分比：展示阶段 + 已运行时长 */
+                <>
+                  <div className="spread" style={{ gap: 10 }}>
+                    <span className="row-sub" style={{ whiteSpace: "normal" }}>
+                      {task.status === "running" ? (
+                        <Spinner size="sm" label={task.stage || "处理中"} />
+                      ) : (
+                        task.stage || "结束"
+                      )}
+                    </span>
+                    {task.elapsed != null ? (
+                      <span className="t-footnote tnum c-secondary">已运行 {Math.round(task.elapsed)}s</span>
+                    ) : null}
+                  </div>
+                  {task.detail ? (
+                    <div className="t-footnote c-secondary" style={{ marginTop: 6, whiteSpace: "normal" }}>
+                      {task.detail}
+                    </div>
+                  ) : null}
+                  {task.status === "error" ? (
+                    <div style={{ marginTop: 8 }}>
+                      <Banner tone="danger" icon="alert">{task.error || "生成失败"}</Banner>
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <Progress value={progress} tone={task.status === "error" ? "danger" : undefined} />
+                  <div className="spread" style={{ marginTop: 8 }}>
+                    <span className="row-sub" style={{ whiteSpace: "normal" }}>
+                      {task.detail || task.stage || "准备中"}
+                    </span>
+                    <span className="t-footnote tnum c-secondary">{progress}%</span>
+                  </div>
+                </>
+              )}
             </div>
           </Group>
         </div>

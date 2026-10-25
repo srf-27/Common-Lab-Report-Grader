@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { errorText, postEmpty, postForm } from "../lib/api";
+import { errorText, postEmpty, postForm, postJSON } from "../lib/api";
 import { useData } from "../lib/hooks";
 import { toast } from "../lib/toast";
 import {
@@ -51,6 +51,7 @@ function fromData(data) {
     emb_url: emb.openai?.base_url || "",
     emb_key: "",
     emb_model: emb.openai?.model || "",
+    grading_workers: data.grading?.workers ?? 3,
   };
 }
 
@@ -61,6 +62,8 @@ export default function Settings() {
   const [form, setForm] = useState(null);
   const [busy, setBusy] = useState(false);
   const [check, setCheck] = useState(null);
+  const [profileName, setProfileName] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
 
   useEffect(() => {
     if (data) setForm(fromData(data));
@@ -102,6 +105,48 @@ export default function Settings() {
     }
   };
 
+  const applyProfile = async (name) => {
+    setProfileBusy(true);
+    try {
+      await postJSON("/llm/profile/apply", { name });
+      await load();
+      toast(`已切换到方案「${name}」，立即生效`, "ok");
+    } catch (err) {
+      toast(errorText(err), "danger");
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const saveProfile = async () => {
+    const name = profileName.trim();
+    if (!name) return toast("请先填写方案名", "danger");
+    setProfileBusy(true);
+    try {
+      await postJSON("/llm/profile/save", { name });
+      setProfileName("");
+      await load();
+      toast(`已把当前配置另存为方案「${name}」`, "ok");
+    } catch (err) {
+      toast(errorText(err), "danger");
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const deleteProfile = async (name) => {
+    setProfileBusy(true);
+    try {
+      await postJSON("/llm/profile/delete", { name });
+      await load();
+      toast(`已删除方案「${name}」`, "ok");
+    } catch (err) {
+      toast(errorText(err), "danger");
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
   return (
     <>
       <PageHead
@@ -121,6 +166,55 @@ export default function Settings() {
           </Banner>
         </div>
       ) : null}
+
+      <Group
+        title="模型方案"
+        note="多套配置一键切换"
+        footer="「另存当前为方案」会把下方当前生效的模型配置存为命名方案；「应用」立即切换（正在跑的评分下一轮生效）。"
+      >
+        {(data.profiles || []).length === 0 ? (
+          <div className="list-row">
+            <span className="c-secondary">还没有保存的方案——配置好模型后点「另存当前为方案」。</span>
+          </div>
+        ) : (
+          (data.profiles || []).map((p) => (
+            <div className="list-row" key={p.name} style={{ gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="row-wrap" style={{ gap: 8 }}>
+                  <span className="t-body">{p.name}</span>
+                  {data.activeProfile === p.name ? <Badge tone="ok">当前</Badge> : null}
+                </div>
+                <span className="t-footnote c-secondary">
+                  {p.backend} · {p.model || "未填模型名"}
+                </span>
+              </div>
+              <Button
+                size="sm"
+                disabled={profileBusy || data.activeProfile === p.name}
+                onClick={() => applyProfile(p.name)}
+              >
+                应用
+              </Button>
+              <Button size="sm" variant="ghost" disabled={profileBusy} onClick={() => deleteProfile(p.name)}>
+                删除
+              </Button>
+            </div>
+          ))
+        )}
+        <div className="list-row" style={{ gap: 8, paddingTop: 10 }}>
+          <input
+            className="input"
+            style={{ maxWidth: 220 }}
+            value={profileName}
+            maxLength={40}
+            placeholder="方案名，如 DeepSeek-生产"
+            onChange={(event) => setProfileName(event.target.value)}
+          />
+          <Button size="sm" icon="save" loading={profileBusy} onClick={saveProfile}>
+            另存当前为方案
+          </Button>
+        </div>
+      </Group>
 
       <Group title="模型" note={data.backendLabel || ""} footer={BACKEND_HINT[form.llm_backend]}>
         <div className="list-row" style={{ display: "block", paddingTop: 14, paddingBottom: 14 }}>
@@ -497,6 +591,29 @@ export default function Settings() {
                 </Field>
               </>
             ) : null}
+          </div>
+        </div>
+      </Group>
+
+      <Group
+        title="评分并发"
+        footer="同时评分的报告份数，1-8，默认 3。供应商限流（429）或本地 Ollama 显存不足时调低；保存后下一轮评分生效。"
+      >
+        <div className="list-row" style={{ display: "block", paddingTop: 14, paddingBottom: 14 }}>
+          <div className="grid-2">
+            <Field label="并行评分份数">
+              {(id) => (
+                <input
+                  id={id}
+                  className="input tnum"
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={form.grading_workers}
+                  onChange={(event) => set("grading_workers", event.target.value)}
+                />
+              )}
+            </Field>
           </div>
         </div>
       </Group>

@@ -25,7 +25,7 @@ from .nodes.rubric_generator import RubricGenerator
 from .utils.file_parser import collect_report_files
 from . import storage
 from .web.state import (
-    OUTPUT_FOLDER, RUNNING_STATUS, SESSIONS_DIR, STUDENT_FIELDS, VALID_LEVELS,
+    OUTPUT_FOLDER, PROJECT_ROOT, RUNNING_STATUS, SESSIONS_DIR, STUDENT_FIELDS, VALID_LEVELS,
     hydrate_session, load_mcp_mount, load_roster, load_sessions, new_session,
     remove_session, sanitize_filename, save_approved, save_mcp_mount, save_roster,
     save_sessions, session_dir, session_sub, state,
@@ -37,8 +37,8 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 app.config["OUTPUT_FOLDER"] = OUTPUT_FOLDER
 app.config["SESSIONS_DIR"] = SESSIONS_DIR
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.dirname(__file__)))), "config", "config.yaml")
+# 绝对路径推导：__file__ 相对/绝对随启动方式变化，dirname×4 会落到项目外层目录
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "config.yaml")
 
 STAGES = [
     ("initial", "① 初始（未配置细则）"),
@@ -240,7 +240,8 @@ def _bootstrap_payload():
             "total": len(ok_reports),
             "graded": len(graded & {r["meta"]["filename"] for r in ok_reports}),
             "hasUpload": any(os.path.splitext(n)[1].lower() in
-                             (".pdf", ".docx", ".doc", ".md", ".zip", ".rar", ".7z")
+                             (".pdf", ".docx", ".doc", ".md", ".zip", ".rar", ".7z",
+                              ".html", ".htm", ".pptx", ".xlsx", ".epub")
                              and not n.startswith("calibration_") for n in names),
         },
         "approved": len(approved),
@@ -312,22 +313,22 @@ def process_criteria():
     rubrics_dir = os.path.join(session_path, "rubrics")
     os.makedirs(rubrics_dir, exist_ok=True)
     generator = RubricGenerator(llm_client=llm(state["config"]), output_dir=rubrics_dir)
-    t = task_start("criteria", "/app/rubric")
+    t = task_start("criteria", "/app/rubric", mode="stage")
     task_update(t, detail=f"已上传 {os.path.basename(filepath)}")
 
     def work():
         try:
-            task_update(t, progress=10, stage="读取评分标准文本")
+            task_update(t, stage="读取评分标准文本")
             doc_text = _read_doc_text(filepath)
             if not doc_text.strip():
                 task_finish(t, "error", "评分标准文档没有可读文本（可能是纯扫描件，请先 OCR）")
                 return
             experiment_text = ""
             if experiment_path and os.path.exists(experiment_path):
-                task_update(t, progress=18, stage="读取实验流程文本")
+                task_update(t, stage="读取实验流程文本")
                 experiment_text = _read_doc_text(experiment_path)
-            task_update(t, progress=25, stage="生成结构化评分细则",
-                        detail="通常需要 1-3 分钟；取消将在当前步骤结束后生效")
+            task_update(t, stage="生成结构化评分细则",
+                        detail="单次长调用，通常需要 1-3 分钟；取消将在当前步骤结束后生效")
             if experiment_text.strip():
                 rubric_json = generator.generate_structured_pair(doc_text, experiment_text)
             else:
@@ -336,7 +337,7 @@ def process_criteria():
                 task_finish(t, "cancelled")
                 return
             warnings = rubric_json.pop("warnings", [])
-            task_update(t, progress=85, stage="保存评分细则")
+            task_update(t, stage="保存评分细则")
             # 磁盘写入无条件进行（落捕获的会话目录）；内存只在仍是当前会话时更新
             _save_rubric(rubric_json, doc_text, experiment_text, base=session_path)
             if os.path.exists(_pilot_path(session_path)):
@@ -351,7 +352,7 @@ def process_criteria():
                 state["rubric_json"] = rubric_json
                 state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
                 state["rubric_warnings"] = warnings
-            task_update(t, progress=100, stage="完成",
+            task_update(t, stage="完成",
                         detail=f"共 {len(rubric_json['criteria'])} 个维度"
                                + (f"；{warnings[0]['message']}" if warnings else ""))
             task_finish(t, "done")
@@ -1358,10 +1359,17 @@ def _grade_one(grader, entry, references="", corrections=None):
 
 
 def _grading_workers():
-    try:
-        return max(1, min(8, int(os.environ.get("ERG_GRADING_WORKERS", "3"))))
-    except ValueError:
-        return 3
+    """评分并发数：config 的 grading.workers 优先（网页可配），其次环境变量，默认 3；一律 clamp 到 1..8。"""
+    def clamp(value):
+        try:
+            return max(1, min(8, int(value)))
+        except (TypeError, ValueError):
+            return None
+
+    workers = clamp((state.get("config") or {}).get("grading", {}).get("workers"))
+    if workers:
+        return workers
+    return clamp(os.environ.get("ERG_GRADING_WORKERS")) or 3
 
 
 def _grade_targets(grader, targets, references, status, corrections=None):
@@ -1736,6 +1744,13 @@ def settings():
     if form.get("emb_key", "").strip():
         emb["openai"]["api_key"] = form["emb_key"].strip()
     emb["openai"]["model"] = form.get("emb_model", emb["openai"].get("model", ""))
+    raw_workers = (form.get("grading_workers") or "").strip()
+    if raw_workers:
+        try:
+            grading_workers = int(raw_workers)
+        except ValueError:
+            return jsonify({"error": "并行数必须是 1-8 的整数"}), 400
+        cfg.setdefault("grading", {})["workers"] = max(1, min(8, grading_workers))
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
     state["config"] = cfg
@@ -1750,6 +1765,68 @@ def _int_or(value, default):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+# ---------------------------------------------------------------- 模型方案（多套配置一键切换）
+def _profile_payload(source):
+    """从 llm 配置段（或已存方案）提取方案本体：backend + 三协议块。"""
+    import copy
+
+    return {key: copy.deepcopy(source[key]) for key in
+            ("backend", "openai", "ollama", "custom") if isinstance(source, dict) and key in source}
+
+
+def _persist_config():
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(state["config"], f, allow_unicode=True, sort_keys=False)
+
+
+def _request_name():
+    payload = request.get_json(silent=True) or request.form or {}
+    return str(payload.get("name", "")).strip()
+
+
+@app.route("/llm/profile/save", methods=["POST"])
+def llm_profile_save():
+    """把当前生效的模型配置快照存为命名方案；同名覆盖。"""
+    name = _request_name()
+    if not name or len(name) > 40:
+        return jsonify({"error": "方案名需为 1-40 个字符"}), 400
+    llm = state["config"].setdefault("llm", {})
+    payload = _profile_payload(llm)
+    if not payload:
+        return jsonify({"error": "当前配置为空，无法保存"}), 400
+    llm.setdefault("profiles", {})[name] = payload
+    _persist_config()
+    return jsonify({"ok": True, "name": name})
+
+
+@app.route("/llm/profile/apply", methods=["POST"])
+def llm_profile_apply():
+    """把方案写入当前生效配置，立即生效（正在跑的评分线程持旧客户端，下一轮生效）。"""
+    name = _request_name()
+    llm = state["config"].setdefault("llm", {})
+    profile = (llm.get("profiles") or {}).get(name)
+    if not profile:
+        return jsonify({"error": f"方案「{name}」不存在"}), 404
+    llm.update(_profile_payload(profile))
+    llm["active_profile"] = name
+    _persist_config()
+    return jsonify({"ok": True, "active": name})
+
+
+@app.route("/llm/profile/delete", methods=["POST"])
+def llm_profile_delete():
+    name = _request_name()
+    llm = state["config"].setdefault("llm", {})
+    profiles = llm.get("profiles") or {}
+    if name not in profiles:
+        return jsonify({"error": f"方案「{name}」不存在"}), 404
+    del profiles[name]
+    if llm.get("active_profile") == name:
+        llm["active_profile"] = ""  # 只清标记，当前配置不变
+    _persist_config()
+    return jsonify({"ok": True})
 
 
 @app.route("/settings/ocr_check", methods=["POST"])
@@ -2096,12 +2173,21 @@ def api_roster():
 @app.route("/api/settings")
 def api_settings():
     cfg = state["config"]
+    llm_cfg = cfg.get("llm") or {}
+    profiles = []
+    for name, profile in (llm_cfg.get("profiles") or {}).items():
+        backend = profile.get("backend") or "openai"
+        profiles.append({"name": name, "backend": backend,
+                         "model": ((profile.get(backend) or {}).get("model")) or ""})
     return jsonify({
-        "llm": cfg.get("llm") or {},
+        "llm": llm_cfg,
         "ocr": cfg.get("ocr") or {},
         "vectorStore": cfg.get("vector_store") or {},
+        "grading": cfg.get("grading") or {},
+        "profiles": profiles,
+        "activeProfile": llm_cfg.get("active_profile") or "",
         "backends": BACKENDS,
-        "backendLabel": BACKENDS.get((cfg.get("llm") or {}).get("backend", "openai"), ""),
+        "backendLabel": BACKENDS.get(llm_cfg.get("backend", "openai"), ""),
     })
 
 
