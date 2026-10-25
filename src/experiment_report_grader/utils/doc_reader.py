@@ -1,4 +1,3 @@
-"""checked"""
 """老式 Word 97-2003（.doc）正文与内嵌图片提取，仅用标准库。
 
 .doc 是 OLE2 复合文档：正文存在 WordDocument 流的文本片段里，

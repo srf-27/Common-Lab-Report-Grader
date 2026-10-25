@@ -1,4 +1,3 @@
-"""checked"""
 """向量库抽象基类：子类实现本地（local）与 API（api）两种接入方式。"""
 
 from abc import ABC, abstractmethod

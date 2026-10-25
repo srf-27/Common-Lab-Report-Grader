@@ -1,6 +1,6 @@
 # 实验报告智能评阅系统 · 深度技术面试 100 题
 
-> 题目与答案全部基于本仓库源码（`src/`、`frontend/`、`app/`、`tests/`、`config/`，排除 `installer/`），每题标注考察维度，答案给出代码位置与具体数字，可直接用于面试自述与追问准备。
+> 题目与答案全部基于本仓库源码（`src/`、`frontend/`、`tests/`、`config/`），每题标注考察维度，答案给出代码位置与具体数字，可直接用于面试自述与追问准备。
 
 **考察维度标签**
 
@@ -15,22 +15,21 @@
 
 ---
 
-## 0. 先记住这 12 条硬事实
+## 0. 先记住这 11 条硬事实
 
 面试里被追问细节时，能报出具体位置和数字，可信度完全不同。
 
 1. 后端约 **5200 行 Python**，其中 `app.py` **1702 行**只做路由与编排；算法在 `nodes/`、`utils/`、`web/`、`mcp/`。
 2. 前端是 **React 19 + Vite 6 自写 SPA**，无组件库、无 CSS 框架，样式只有 `frontend/src/styles.css` 一份设计令牌；构建产物直接落到 `src/experiment_report_grader/static/ui/`。
-3. 另有一个 **Flutter Cupertino 客户端**（`app/`），零插件，只调同一套 HTTP 接口，不含任何评分逻辑。
-4. 等级与分值固定：**A=95 / B=80 / C=60 / D=40 / E=0**；总分 = Σ(等级分 × 权重)，权重在 `rubric_io.normalize_weights` 归一到 100%。
-5. 评分链路顺序固定：**注入检测 → 内容安全 → 相似度 → 机械判决 → 语义判级 → 维度归一 → 小计**（`Grader.grade_single`）。
-6. 三道检查的失败策略不同：注入 **fail-closed**（转人工）、内容安全 **fail-open 但标记**、隐私脱敏 **回退正则**。
-7. 契约点：**注入检测送审上限 20000 字符**，**报告正文送模型上限 8000 字符**，**图片说明取前 20 张、每张 200 字**，**分块上限 30 块、每块 300 字**。
-8. 相似度：全文向量最近邻，**≥0.92 告警、≥0.97 标 "rejected"**（余弦相似度 = 1 − distance）。
-9. 机械判决：LLM 生成 `verify(text)` → **AST 白名单（只允许 re/math/json）+ 受限 builtins** 执行；失败回退 `rules`（`exists` / `numeric_compare`）。
-10. 数据全落 `data/output/sessions/<课程ID>/`：`rubrics/`、`uploads/`、`reports/<stem>/`、`grading/`、`kb_db/`、`approved.json`、`roster.json`、`mcp.json`。
-11. 运行时是**单进程 + 模块级全局 `state` 字典 + daemon 线程**；前端 **1.2 秒轮询** `/grading_status`。
-12. 单份报告 **10–40 秒**，一次评分至少 **3 次 LLM 调用**（注入、安全、判级），终审再加脱敏调用。
+3. 等级与分值固定：**A=95 / B=80 / C=60 / D=40 / E=0**；总分 = Σ(等级分 × 权重)，权重在 `rubric_io.normalize_weights` 归一到 100%。
+4. 评分链路顺序固定：**注入检测 → 内容安全 → 相似度 → 机械判决 → 语义判级 → 维度归一 → 小计**（`Grader.grade_single`）。
+5. 三道检查的失败策略不同：注入 **fail-closed**（转人工）、内容安全 **fail-open 但标记**、隐私脱敏 **回退正则**。
+6. 契约点：**注入检测送审上限 20000 字符**，**报告正文送模型上限 8000 字符**，**图片说明取前 20 张、每张 200 字**，**分块上限 30 块、每块 300 字**。
+7. 相似度：全文向量最近邻，**≥0.92 告警、≥0.97 标 "rejected"**（余弦相似度 = 1 − distance）。
+8. 机械判决：LLM 生成 `verify(text)` → **AST 白名单（只允许 re/math/json）+ 受限 builtins** 执行；失败回退 `rules`（`exists` / `numeric_compare`）。
+9. 数据全落 `data/output/sessions/<课程ID>/`：`rubrics/`、`uploads/`、`reports/<stem>/`、`grading/`、`kb_db/`、`approved.json`、`roster.json`、`mcp.json`。
+10. 运行时是**单进程 + 模块级全局 `state` 字典 + daemon 线程**；前端 **1.2 秒轮询** `/grading_status`。
+11. 单份报告 **10–40 秒**，一次评分至少 **3 次 LLM 调用**（注入、安全、判级），终审再加脱敏调用。
 
 ---
 
@@ -300,15 +299,11 @@
 
 ---
 
-### Q17. Flutter 客户端凭什么能复用同一套后端？意义是什么？
+### Q17.（已移除）曾有一个 Flutter 客户端，为什么删掉？
 
-`【选型】【迁移】`
+`【选型】`
 
-**答**：因为它**不复制任何评分逻辑**，只调 `/api/*` 与表单端点（`app/README.md` 里有 12 个页面与接口的映射表）。判分、计量、细则、向量库全部留在 Python 侧，所以两端结果天然一致——不需要"对齐两份实现"，那是同步 bug 的温床。
-
-技术选择上刻意**零 Flutter 插件**：选文件用 PowerShell/osascript 起系统对话框（`lib/pickers.dart`），网络用 `dart:io` 的 `HttpClient`。换来一个很实际的收益：Windows 上不需要开发者模式/符号链接，`flutter run -d windows` 开箱可用。
-
-**代价**：Android/Linux 的文件选择不可用；Web 版需要后端开 CORS（当前没开，只能 `flutter run -d chrome` 调试）。这是"少依赖"换"平台覆盖"的典型取舍。
+**答**：`app/` 曾是 Flutter Cupertino 客户端的构建产物（源码在独立分支维护），只调 HTTP 接口、不含评分逻辑。2026-10 清理时整体移除：本仓库只保留 Web SPA 一种前端，避免双端维护与 CORS 等附带成本。保留本题编号以维持目录引用。
 
 ---
 
@@ -316,15 +311,15 @@
 
 `【选型】【场景】`
 
-**答**：它是一份**变更契约**，不是注释。10 个文件（`config/*.yaml`、`embedding/{base,chroma,__init__}.py`、`nodes/report_extractor.py`、`utils/{doc_reader,file_parser,llm_client,ocr_engine}.py`）是能力底座，改动会波及全部调用方，所以约定"扩能力走新模块，不改这些文件"。
+**答**：它曾是一份**变更契约**（现已退役，标识已随 2026-10 清理移除）。当时 10 个文件（`config/*.yaml`、`embedding/{base,chroma,__init__}.py`、`nodes/report_extractor.py`、`utils/{doc_reader,file_parser,llm_client,ocr_engine}.py`）是能力底座，改动会波及全部调用方，所以约定"扩能力走新模块，不改这些文件"。
 
-实际落地方式很典型：
+实际落地方式当时很典型：
 
 1. OCR 自检写到 `utils/ocr_check.py`，而不是改 `ocr_engine.py`；
 2. 插图 OCR 开关放在 `app.py` 的 `_image_entries`，不动 `file_parser`；
 3. 用量计量用 `MeteredLLM` **继承** `LLMClient`，而不是改它。
 
-**代价**：`MeteredLLM` 复制了 `_call_openai`，代码里明确标了 `shortcut: … 该文件若调整请求参数，这里要同步`。这类"复制换不改"在小项目里可接受，但必须有注释标同步点——它标了。
+**退役原因**：约定靠文档与自觉维持，没有测试或脚本强制，且文档清单与实际标记文件已漂移（有标了没列的、列了没标的）。现在统一按普通代码对待，改动走正常 review。`MeteredLLM` 里 `shortcut: … 该文件若调整请求参数，这里要同步` 的注释仍有效。
 
 ---
 

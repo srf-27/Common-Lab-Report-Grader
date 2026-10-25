@@ -1,4 +1,3 @@
-"""checked"""
 
 class OCREngine:
     _instance = None
