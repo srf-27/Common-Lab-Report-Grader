@@ -1,4 +1,3 @@
-"""checked"""
 
 import os
 import threading

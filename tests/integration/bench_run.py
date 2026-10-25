@@ -83,9 +83,10 @@ if len(sys.argv) < 3 or sys.argv[2] != "no-finalize":  # 一致性评测不需�
     for r in graded:
         client.post(f"/approve_report/{r['report_id']}")
 
-page = client.get("/grading_done")
 agreement = agreement_report(results, rubric, teacher)
-print("6) 结果页:", page.status_code, "| 页面含一致性块:", "Krippendorff" in page.get_data(as_text=True))
+page = client.get("/api/results")
+counts = (page.get_json() or {}).get("counts", {})
+print("6) 结果接口:", page.status_code, "| 已评:", counts.get("graded"), "| 失败:", counts.get("failed"))
 
 
 def fmt(v):

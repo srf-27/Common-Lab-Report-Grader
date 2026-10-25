@@ -190,21 +190,9 @@ def test_pages_render_for_every_route():
     client = app.test_client()
     for url in ("/", "/app", "/app/workbench", "/app/rubric", "/task_status"):
         assert client.get(url).status_code == 200, url
-    redirects = {
-        "/classic": "/app/workbench",
-        "/rubric_review": "/app/rubric",
-        "/reports_list": "/app/reports",
-        "/roster": "/app/roster",
-        "/settings": "/app/settings",
-        "/mcp": "/app/mcp",
-        "/grading_select": "/app/select",
-        "/grading_progress": "/app/results",
-        "/grading_done": "/app/results",
-        "/task": "/app/",
-    }
-    for url, target in redirects.items():
-        resp = client.get(url)
-        assert resp.status_code == 302 and target in resp.headers["Location"], url
+    # 旧 Jinja 兼容跳转路由已删除；/settings 的 GET 分支仍跳到 SPA 设置页
+    resp = client.get("/settings")
+    assert resp.status_code == 302 and "/app/settings" in resp.headers["Location"]
 
 
 if __name__ == "__main__":

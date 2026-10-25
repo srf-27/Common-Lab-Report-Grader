@@ -6,7 +6,6 @@ Usage:
     python run.py [--host HOST] [--port PORT] [--debug]
 """
 
-import os
 import sys
 import argparse
 from pathlib import Path

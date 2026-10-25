@@ -7,7 +7,6 @@ const PROXIED = [
   "/api",
   "/static",
   "/session",
-  "/task",
   "/task_status",
   "/task_cancel",
   "/grading_status",

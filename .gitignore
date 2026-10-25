@@ -22,7 +22,6 @@ config/config.yaml
 docs/materials/
 
 # Temporary files
-_calib.html
 *.log
 *.tmp
 
@@ -30,6 +29,7 @@ _calib.html
 frontend/node_modules/
 src/experiment_report_grader/static/ui/
 .workbuddy/
+.zcode/
 node_modules/
 .idea/
 .vscode/
@@ -57,18 +57,9 @@ htmlcov/
 # mypy
 .mypy_cache/
 
-# Flutter 客户端（独立分支维护）
-app/
-
 # 本地运行时与工具产物
 .runtime/
-installer/.dart_tool/
-installer/windows/flutter/ephemeral/
-installer/build/
 *.iml
-
-# 根目录生成物（一致性报告等）
-/output/
 
 # 个人材料（简历 / 面试稿，不入库）
 简历*
