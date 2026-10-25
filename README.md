@@ -230,7 +230,7 @@ python run.py --port 8080 --host 0.0.0.0
 
 ### ③ 上传实验报告
 
-进入 **实验报告**，可以多选文件、拖拽到上传框，或直接丢一个 `.zip` / `.rar` / `.7z` 压缩包。系统会：
+进入 **实验报告**，可以多选文件、拖拽到上传框，或直接丢一个 `.zip` / `.rar` / `.7z` 压缩包。除 PDF/DOCX/DOC/MD 外，还支持 `.html` / `.pptx` / `.xlsx` / `.epub`——这些格式本地解析器不处理，会经 **markitdown 插件**（`pip install markitdown-mcp` 后在插件页或 `config/mcp.yaml` 注册）转成 Markdown；插件缺席时这些格式会被跳过，其余行为不变。系统会：
 
 - 提取正文、表格、插图、学生信息（姓名/学号/班级，按花名册表头来）；
 - 扫描件/无文本 PDF 自动走 OCR；
@@ -307,6 +307,7 @@ python run.py --port 8080 --host 0.0.0.0
 | `ocr.api.api_url/api_key/api_model`            | 视觉 OCR 接口                                | —                            |
 | `grading.similarity_threshold`                 | 全文相似度告警线                                 | `0.92`                       |
 | `grading.similarity_reject`                    | 判为高度重复的线                                 | `0.97`                       |
+| `grading.workers`                              | 并行评分份数（配置页可改，1–8，写回本文件）            | `3`                         |
 | `grading.ocr_images`                           | 是否对报告插图跑 OCR（结果缓存在 `reports/*/.ocr/`）    | `false`                      |
 | `vector_store.backend`                         | 向量库类型                                    | `chroma`                     |
 | `vector_store.chroma.mode`                     | `local`（每课程独立目录）或 `cloud`（Chroma Server） | `local`                      |

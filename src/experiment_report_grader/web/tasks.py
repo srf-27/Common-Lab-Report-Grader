@@ -24,14 +24,18 @@ def _snapshot(sid, t):
             pass
 
 
-def task_start(kind, redirect, total=0, sid=None):
-    """创建并登记任务进度，返回 task dict；后台线程应持该引用调用 task_update/task_finish。"""
+def task_start(kind, redirect, total=0, sid=None, mode="bar"):
+    """创建并登记任务进度，返回 task dict；后台线程应持该引用调用 task_update/task_finish。
+
+    mode="bar"：确定性进度（逐文件/逐份），前端渲染进度条；
+    mode="stage"：无法如实量化进度的长任务（如单次长 LLM 调用），前端渲染阶段 + 已运行时长。
+    """
     from .state import state
 
     sid = sid or state.get("session")
     t = {"kind": kind, "status": "running", "progress": 0, "stage": "准备中",
          "detail": "", "cancel": False, "redirect": redirect, "error": "",
-         "done": 0, "total": total, "started": time.time(), "sid": sid}
+         "done": 0, "total": total, "started": time.time(), "sid": sid, "mode": mode}
     with task_lock:
         if sid:
             RUNNING_TASKS[sid] = t
@@ -68,8 +72,8 @@ def task_finish(t, status, error=""):
         t["status"] = status
         t["error"] = str(error)
         t["ended"] = time.time()
-        if status == "done":
-            t["progress"] = 100
+        if status == "done" and t.get("mode") != "stage":
+            t["progress"] = 100  # stage 模式没有真实百分比，不伪造 100%
     _snapshot(t.get("sid"), t)
 
 
