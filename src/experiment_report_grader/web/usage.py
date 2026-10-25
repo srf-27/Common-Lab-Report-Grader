@@ -5,11 +5,11 @@
 换别的厂商改 PRICES，或用 LLM_PRICE_HIT / LLM_PRICE_MISS / LLM_PRICE_OUT 覆盖。
 """
 
-import json
 import os
 import threading
 import time
 
+from .. import storage
 from ..utils.llm_client import LLMClient, openai_client
 
 # (缓存命中输入, 缓存未命中输入, 输出)，单位：元 / 百万 token，均为高峰价
@@ -74,17 +74,13 @@ def path_for(session_dir):
 
 def load(session_dir):
     data = empty()
-    try:
-        with open(path_for(session_dir), "r", encoding="utf-8") as f:
-            saved = json.load(f)
-        if isinstance(saved, dict):
-            for key in data:
-                if key in saved:
-                    data[key] = saved[key]
-            if not isinstance(data["events"], list):
-                data["events"] = []
-    except (OSError, ValueError):
-        pass
+    saved = storage.read_json(path_for(session_dir), None)
+    if isinstance(saved, dict):
+        for key in data:
+            if key in saved:
+                data[key] = saved[key]
+        if not isinstance(data["events"], list):
+            data["events"] = []
     repriced = False
     for event in data["events"]:
         if event.get("src") == "legacy" and not event.get("priced"):
@@ -113,11 +109,7 @@ def load(session_dir):
 
 
 def _write(session_dir, data):
-    os.makedirs(session_dir, exist_ok=True)
-    tmp = path_for(session_dir) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, path_for(session_dir))
+    storage.write_json(path_for(session_dir), data)
 
 
 def _cached_tokens(usage):
@@ -282,7 +274,7 @@ def payload(session_dir, days=1, model=None):
 class MeteredLLM(LLMClient):
     """记录用量后再返回原文，行为与 LLMClient 完全一致。
 
-    shortcut: _call_openai 复制自受保护文件 llm_client.py，仅多出 usage 记录；
+    shortcut: _call_openai 复制自 llm_client.py，仅多出 usage 记录；
     该文件若调整请求参数，这里要同步。
     """
 

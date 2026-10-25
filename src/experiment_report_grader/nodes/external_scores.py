@@ -5,8 +5,9 @@
 键优先用学号，其次姓名；分数统一为百分制。
 """
 
-import json
 import os
+
+from .. import storage
 
 
 def path_for(session_dir):
@@ -14,21 +15,12 @@ def path_for(session_dir):
 
 
 def load(session_dir):
-    try:
-        with open(path_for(session_dir), "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        return data if isinstance(data, dict) and isinstance(data.get("scores"), dict) else {}
-    except (OSError, ValueError):
-        return {}
+    data = storage.read_json(path_for(session_dir), None)
+    return data if isinstance(data, dict) and isinstance(data.get("scores"), dict) else {}
 
 
 def save(session_dir, data):
-    os.makedirs(session_dir, exist_ok=True)
-    target = path_for(session_dir)
-    tmp = target + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2)
-    os.replace(tmp, target)
+    storage.write_json(path_for(session_dir), data, indent=2)
 
 
 def apply_to_results(results, rubric, external, student_of):

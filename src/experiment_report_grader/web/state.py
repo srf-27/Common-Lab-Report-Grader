@@ -6,6 +6,7 @@ import re
 import threading
 import time
 
+from .. import storage
 from ..nodes import rubric_io
 from ..nodes import external_scores
 from .usage import load as load_usage
@@ -21,6 +22,10 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 VALID_LEVELS = ("A", "B", "C", "D", "E")
 STUDENT_FIELDS = ["班级", "学院", "学号", "姓名"]
 SUBDIRS = ("rubrics", "reports", "grading", "uploads")
+
+# 会话隔离的运行态注册表：sid -> 进度 dict。后台线程只更新自己持有的 dict 引用；
+# hydrate 按当前会话恢复，切课后旧线程的写入不会漏进新会话。
+RUNNING_STATUS = {}
 
 state = {
     "config": load_config(),
@@ -52,17 +57,11 @@ def sanitize_filename(name):
 
 
 def _read_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
+    return storage.read_json(path, default)
 
 
 def _write_json(path, data, indent=None):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=indent)
+    storage.write_json(path, data, indent=indent)
 
 
 def sessions_index_path():
@@ -152,8 +151,12 @@ def _images_of(report_dir):
 
 def hydrate_session(sid):
     """切换/恢复课程：清空内存状态并按会话目录重建（含已评结果与 MCP 挂载）。"""
+    from . import tasks as task_mod  # 函数内导入，避免与 tasks -> state 的模块级互引
+
     state["session"] = sid
-    state["corrections"] = {}
+    # 易失记忆从存储恢复：教师重评意见、上一轮任务/评分的终态、校准工作区
+    state["corrections"] = storage.read_json(
+        os.path.join(session_dir(sid), "corrections.json"), {}) or {}
     state["extracted_reports"] = []
     state["report_uploads"] = []
     state["grader"] = None
@@ -163,8 +166,27 @@ def hydrate_session(sid):
     state["experiment_doc"] = ""
     state["external"] = {}
     state["calibration"] = None
-    state["grading_status"] = None
+    # 易跨会话残留的 key 一并复位：进度从注册表恢复本会话的，其余清空
+    state["grading_status"] = RUNNING_STATUS.get(sid)
+    state["task"] = task_mod.RUNNING_TASKS.get(sid)
+    # 无在跑任务时恢复上一轮终态快照（重启后线程已死，running 不复活）
+    if state["grading_status"] is None:
+        snapshot = storage.read_json(
+            os.path.join(session_dir(sid), "memory", "grading_status.json"), None)
+        if snapshot and snapshot.get("phase") in ("done", "cancelled", "error"):
+            state["grading_status"] = snapshot
+    if state["task"] is None:
+        snapshot = storage.read_json(os.path.join(session_dir(sid), "memory", "task.json"), None)
+        if snapshot and snapshot.get("status") in ("done", "error", "cancelled"):
+            state["task"] = snapshot
+    calib = storage.read_json(os.path.join(session_dir(sid), "calibration_workspace.json"), None)
+    if isinstance(calib, dict) and calib.get("text"):
+        state["calibration"] = calib
+    state["rubric_warnings"] = None
     state["mcp_status"] = []
+    state.pop("mcp_refs", None)
+    state.pop("criteria_upload", None)
+    state.pop("criteria_experiment", None)
     state["usage"] = load_usage(session_dir(sid))
     for sub in SUBDIRS:
         os.makedirs(os.path.join(SESSIONS_DIR, sid, sub), exist_ok=True)
@@ -175,17 +197,12 @@ def hydrate_session(sid):
         state["rubric_json"] = rubric_json
         state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
         markdown_path = os.path.join(session_dir(sid), "rubrics", "rubric_latest.md")
-        if not os.path.exists(markdown_path):
-            with open(markdown_path, "w", encoding="utf-8") as f:
-                f.write(state["rubric"])
-    doc_path = os.path.join(session_dir(sid), "rubrics", "criteria_doc.txt")
-    if os.path.exists(doc_path):
-        with open(doc_path, "r", encoding="utf-8") as f:
-            state["criteria_doc"] = f.read()
-    experiment_path = os.path.join(session_dir(sid), "rubrics", "experiment_doc.txt")
-    if os.path.exists(experiment_path):
-        with open(experiment_path, "r", encoding="utf-8") as f:
-            state["experiment_doc"] = f.read()
+        if not storage.exists(markdown_path):
+            storage.write_text(markdown_path, state["rubric"])
+    state["criteria_doc"] = storage.read_text(
+        os.path.join(session_dir(sid), "rubrics", "criteria_doc.txt"))
+    state["experiment_doc"] = storage.read_text(
+        os.path.join(session_dir(sid), "rubrics", "experiment_doc.txt"))
 
     reports_dir = os.path.join(session_dir(sid), "reports")
     for name in sorted(os.listdir(reports_dir)):

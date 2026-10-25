@@ -1,9 +1,9 @@
-"""checked"""
 import os
 import re
 from zipfile import ZipFile
 import pymupdf
 
+from .. import storage
 from .doc_reader import read_doc
 
 
@@ -102,8 +102,7 @@ def extract_pdf(filepath, output_dir, ocr_engine=None):
                 img_index += 1
 
     text_path = os.path.join(output_dir, "text.md")
-    with open(text_path, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(full_text))
+    storage.write_text(text_path, "\n\n".join(full_text))
 
     doc.close()
 
@@ -184,8 +183,7 @@ def extract_docx(filepath, output_dir):
             })
 
     text_path = os.path.join(output_dir, "text.md")
-    with open(text_path, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(full_text))
+    storage.write_text(text_path, "\n\n".join(full_text))
 
     meta = {
         "filename": os.path.basename(filepath),
@@ -288,8 +286,7 @@ def _write_images(output_dir, images):
 
 def _write_text(filepath, output_dir, text, image_count=0):
     os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "text.md"), "w", encoding="utf-8") as f:
-        f.write(text)
+    storage.write_text(os.path.join(output_dir, "text.md"), text)
     meta = {
         "filename": os.path.basename(filepath),
         "chars": len(text),

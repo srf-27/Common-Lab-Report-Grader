@@ -23,12 +23,14 @@ from .nodes.grader import Grader, _coerce_rubric
 from .nodes.report_extractor import ReportExtractor
 from .nodes.rubric_generator import RubricGenerator
 from .utils.file_parser import collect_report_files
+from . import storage
 from .web.state import (
-    OUTPUT_FOLDER, SESSIONS_DIR, STUDENT_FIELDS, VALID_LEVELS, hydrate_session,
-    load_mcp_mount, load_roster, load_sessions, new_session, remove_session,
-    sanitize_filename, save_approved, save_mcp_mount, save_roster, save_sessions,
-    session_dir, session_sub, state,
+    OUTPUT_FOLDER, RUNNING_STATUS, SESSIONS_DIR, STUDENT_FIELDS, VALID_LEVELS,
+    hydrate_session, load_mcp_mount, load_roster, load_sessions, new_session,
+    remove_session, sanitize_filename, save_approved, save_mcp_mount, save_roster,
+    save_sessions, session_dir, session_sub, state,
 )
+from .web import tasks as task_mod
 from .web.tasks import task_cancelled, task_finish, task_running, task_start, task_update
 
 app = Flask(__name__)
@@ -55,15 +57,13 @@ def _bootstrap():
         hydrate_session(idx["current"] or idx["sessions"][-1]["id"])
 
 
+storage.configure(state["config"])  # 配了 PG 则全量入库；连不上静默回退文件
 _bootstrap()
 
 
 # ---------------------------------------------------------------- 通用小工具
 def _read_text(path):
-    if not path or not os.path.exists(path):
-        return ""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    return storage.read_text(path)
 
 
 def _read_doc_text(filepath):
@@ -203,7 +203,10 @@ def session_switch():
 
 @app.route("/session/remove", methods=["POST"])
 def session_remove():
-    entry = remove_session(request.form.get("session_id", ""))
+    sid = request.form.get("session_id", "")
+    RUNNING_STATUS.pop(sid, None)
+    task_mod.RUNNING_TASKS.pop(sid, None)
+    entry = remove_session(sid)
     hydrate_session(entry["id"])
     return redirect("/app/workbench")
 
@@ -251,12 +254,6 @@ def _bootstrap_payload():
                        "krippendorff_alpha": agreement["overall"]["krippendorff_alpha"]}
                       if agreement and agreement["overall"]["n"] else None),
     }
-
-
-# ---------------------------------------------------------------- 工作台（旧路径重定向到 SPA）
-@app.route("/classic")
-def index():
-    return redirect("/app/workbench")
 
 
 def _agreement():
@@ -308,52 +305,58 @@ def process_criteria():
         state["criteria_upload"] = filepath
     if _busy():
         return redirect("/app/workbench")
-    task_start("criteria", "/app/rubric")
-    task_update(detail=f"已上传 {os.path.basename(filepath)}")
+    # 请求线程内捕获会话与路径，线程绝不读 state / 不调 session_dir()
+    sid = state["session"]
+    session_path = session_dir()
+    experiment_path = state.get("criteria_experiment")
+    rubrics_dir = os.path.join(session_path, "rubrics")
+    os.makedirs(rubrics_dir, exist_ok=True)
+    generator = RubricGenerator(llm_client=llm(state["config"]), output_dir=rubrics_dir)
+    t = task_start("criteria", "/app/rubric")
+    task_update(t, detail=f"已上传 {os.path.basename(filepath)}")
 
     def work():
         try:
-            task_update(progress=10, stage="读取评分标准文本")
+            task_update(t, progress=10, stage="读取评分标准文本")
             doc_text = _read_doc_text(filepath)
             if not doc_text.strip():
-                task_finish("error", "评分标准文档没有可读文本（可能是纯扫描件，请先 OCR）")
+                task_finish(t, "error", "评分标准文档没有可读文本（可能是纯扫描件，请先 OCR）")
                 return
             experiment_text = ""
-            experiment_path = state.get("criteria_experiment")
             if experiment_path and os.path.exists(experiment_path):
-                task_update(progress=18, stage="读取实验流程文本")
+                task_update(t, progress=18, stage="读取实验流程文本")
                 experiment_text = _read_doc_text(experiment_path)
-            task_update(progress=25, stage="生成结构化评分细则",
+            task_update(t, progress=25, stage="生成结构化评分细则",
                         detail="通常需要 1-3 分钟；取消将在当前步骤结束后生效")
-            gen = RubricGenerator(llm_client=llm(state["config"]),
-                                  output_dir=session_sub("rubrics"))
             if experiment_text.strip():
-                rubric_json = gen.generate_structured_pair(doc_text, experiment_text)
+                rubric_json = generator.generate_structured_pair(doc_text, experiment_text)
             else:
-                rubric_json = gen.generate_structured(doc_text)
-            if task_cancelled():
-                task_finish("cancelled")
+                rubric_json = generator.generate_structured(doc_text)
+            if task_cancelled(t):
+                task_finish(t, "cancelled")
                 return
             warnings = rubric_json.pop("warnings", [])
-            task_update(progress=85, stage="保存评分细则")
-            state["criteria_doc"] = doc_text
-            state["experiment_doc"] = experiment_text
-            state["rubric_json"] = rubric_json
-            state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
-            _save_rubric(rubric_json, doc_text, experiment_text)
-            if os.path.exists(_pilot_path()):
-                pilot = _load_pilot()
+            task_update(t, progress=85, stage="保存评分细则")
+            # 磁盘写入无条件进行（落捕获的会话目录）；内存只在仍是当前会话时更新
+            _save_rubric(rubric_json, doc_text, experiment_text, base=session_path)
+            if os.path.exists(_pilot_path(session_path)):
+                pilot = _load_pilot(session_path)
                 for entry in pilot["reports"]:
                     entry["ai"] = {}
                     entry["status"] = "pending"
-                _save_pilot(pilot)
-            state["rubric_warnings"] = warnings
-            task_update(progress=100, stage="完成",
+                _save_pilot(pilot, session_path)
+            if state.get("session") == sid:
+                state["criteria_doc"] = doc_text
+                state["experiment_doc"] = experiment_text
+                state["rubric_json"] = rubric_json
+                state["rubric"] = rubric_io.criteria_to_markdown(rubric_json)
+                state["rubric_warnings"] = warnings
+            task_update(t, progress=100, stage="完成",
                         detail=f"共 {len(rubric_json['criteria'])} 个维度"
                                + (f"；{warnings[0]['message']}" if warnings else ""))
-            task_finish("done")
+            task_finish(t, "done")
         except Exception as e:
-            task_finish("cancelled" if task_cancelled() else "error", e)
+            task_finish(t, "cancelled" if task_cancelled(t) else "error", e)
 
     threading.Thread(target=work, daemon=True).start()
     return redirect("/app/workbench")
@@ -386,21 +389,22 @@ def _sync_dimension_collections(names):
         pass
 
 
-def _save_rubric(rubric_json, doc_text=None, experiment_text=None):
-    path = os.path.join(session_sub("rubrics"), "rubric_current.json")
-    rubric_io.save_rubric_json(rubric_json, path)
-    with open(os.path.join(session_dir(), "rubrics", "rubric_latest.md"), "w", encoding="utf-8") as f:
-        f.write(rubric_io.criteria_to_markdown(rubric_json))
+def _save_rubric(rubric_json, doc_text=None, experiment_text=None, base=None):
+    """base 显式传入时写该会话目录（后台线程用），否则写当前会话。"""
+    base = base or session_dir()
+    rubrics_dir = os.path.join(base, "rubrics")
+    os.makedirs(rubrics_dir, exist_ok=True)
+    rubric_io.save_rubric_json(rubric_json, os.path.join(rubrics_dir, "rubric_current.json"))
+    storage.write_text(os.path.join(rubrics_dir, "rubric_latest.md"),
+                       rubric_io.criteria_to_markdown(rubric_json))
     if doc_text is not None:
-        with open(os.path.join(session_dir(), "rubrics", "criteria_doc.txt"), "w", encoding="utf-8") as f:
-            f.write(doc_text)
+        storage.write_text(os.path.join(rubrics_dir, "criteria_doc.txt"), doc_text)
     if experiment_text is not None:
-        experiment_path = os.path.join(session_dir(), "rubrics", "experiment_doc.txt")
+        experiment_path = os.path.join(rubrics_dir, "experiment_doc.txt")
         if experiment_text.strip():
-            with open(experiment_path, "w", encoding="utf-8") as f:
-                f.write(experiment_text)
-        elif os.path.exists(experiment_path):
-            os.remove(experiment_path)
+            storage.write_text(experiment_path, experiment_text)
+        else:
+            storage.remove(experiment_path)
 
 
 def _apply_external():
@@ -512,29 +516,20 @@ def rubric_external_upload():
 
 
 # ---------------------------------------------------------------- 样本校准
-def _pilot_path():
-    return os.path.join(session_dir(), "pilot", "pilot.json")
+def _pilot_path(base=None):
+    return os.path.join(base or session_dir(), "pilot", "pilot.json")
 
 
-def _load_pilot():
-    try:
-        with open(_pilot_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        data = {}
+def _load_pilot(base=None):
+    data = storage.read_json(_pilot_path(base), {}) or {}
     data.setdefault("reports", [])
     data.setdefault("confirmed_at", 0)
     data.setdefault("rubric_hash", "")
     return data
 
 
-def _save_pilot(data):
-    path = _pilot_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+def _save_pilot(data, base=None):
+    storage.write_json(_pilot_path(base), data, indent=2)
 
 
 def _rubric_hash():
@@ -548,8 +543,8 @@ def _rubric_confirmed():
     return bool(pilot.get("confirmed_at")) and pilot.get("rubric_hash") == _rubric_hash()
 
 
-def _pilot_text_path(entry):
-    return os.path.join(session_dir(), entry.get("text") or "")
+def _pilot_text_path(entry, base=None):
+    return os.path.join(base or session_dir(), entry.get("text") or "")
 
 
 @app.route("/pilot/upload", methods=["POST"])
@@ -591,21 +586,24 @@ def pilot_run():
         return jsonify({"error": "请先上传测试报告"}), 400
     if task_running():
         return jsonify({"error": "有任务正在进行，请稍候"}), 409
-    task_start("pilot", "/app/rubric")
+    # 请求线程内构造 Grader 与路径：MeteredLLM 在此捕获正确的会话，用量不串课
+    session_path = session_dir()
+    pilot_dir = os.path.join(session_path, "pilot")
+    grader = Grader(state["rubric_json"], llm_client=llm(state["config"]),
+                    config=state["config"],
+                    output_dir=os.path.join(pilot_dir, "grading"),
+                    kb_session_dir=os.path.join(pilot_dir, "kb"))
+    t = task_start("pilot", "/app/rubric")
 
     def work():
         try:
-            grader = Grader(state["rubric_json"], llm_client=llm(state["config"]),
-                            config=state["config"],
-                            output_dir=os.path.join(session_sub("pilot"), "grading"),
-                            kb_session_dir=os.path.join(session_sub("pilot"), "kb"))
             total = len(data["reports"])
             for index, entry in enumerate(data["reports"]):
-                if task_cancelled():
-                    task_finish("cancelled")
+                if task_cancelled(t):
+                    task_finish(t, "cancelled")
                     return
-                task_update(progress=90 * index / total, detail=entry["filename"])
-                text = _read_text(_pilot_text_path(entry))
+                task_update(t, progress=90 * index / total, detail=entry["filename"])
+                text = _read_text(_pilot_text_path(entry, session_path))
                 chunks = _chunks(text)
                 assignments = grader.assign_items(
                     [{"id": f"p{i}", "text": chunk[:300]} for i, chunk in enumerate(chunks)],
@@ -617,13 +615,13 @@ def pilot_run():
                 entry["chunks"] = chunks
                 entry["assignments"] = assignments
                 entry["status"] = outcome["result"].get("status")
-                task_update(done=index + 1)
-            _save_pilot(data)
-            task_update(progress=100, stage="完成",
+                task_update(t, done=index + 1)
+            _save_pilot(data, session_path)
+            task_update(t, progress=100, stage="完成",
                         detail=f"已用模型评完 {len(data['reports'])} 份样本")
-            task_finish("done")
+            task_finish(t, "done")
         except Exception as exc:
-            task_finish("cancelled" if task_cancelled() else "error", exc)
+            task_finish(t, "cancelled" if task_cancelled(t) else "error", exc)
 
     threading.Thread(target=work, daemon=True).start()
     return jsonify({"ok": True})
@@ -696,16 +694,6 @@ def api_pilot():
     })
 
 
-@app.route("/task")
-def task_page():
-    t = state.get("task")
-    if not t:
-        return redirect("/app/workbench")
-    if t["status"] != "running":
-        return redirect(t.get("redirect") or "/app/workbench")
-    return redirect("/app/workbench")
-
-
 @app.route("/task_status")
 def task_status():
     t = state.get("task") or {}
@@ -723,10 +711,6 @@ def task_cancel():
         t["stage"] = "正在取消（等待当前步骤结束）…"
     return jsonify({"ok": True})
 
-
-@app.route("/rubric_review")
-def rubric_review():
-    return redirect("/app/rubric")
 
 
 @app.route("/rubric_gen_cell", methods=["POST"])
@@ -793,22 +777,17 @@ def calibrate_upload():
     text = _read_text(os.path.join(extraction["meta"]["output_dir"], "text.md"))
     chunks = _chunks(text)
     grader = Grader(state["rubric_json"], llm_client=llm(state["config"]), config=state["config"],
-                    similarity_scope=state.get("session"))
+                    similarity_scope=state.get("session"),
+                    kb_session_dir=os.path.join(session_dir(), "calibration_kb"))
     assignments = grader.assign_items([{"id": f"p{i}", "text": c[:300]}
                                        for i, c in enumerate(chunks)], shots_query=text[:1500])
     state["calibration"] = {"text": text, "chunks": chunks, "assignments": assignments,
                             "filename": extraction["meta"].get("filename", report_file.filename)}
+    storage.write_json(os.path.join(session_dir(), "calibration_workspace.json"),
+                       state["calibration"])
     return redirect("/app/calibration")
 
 
-@app.route("/calibrate_score")
-def calibrate_score():
-    return redirect("/app/calibration")
-
-
-@app.route("/rubric_calibrate", methods=["POST"])
-def rubric_calibrate():
-    return redirect("/app/calibration")
 
 
 # ---------------------------------------------------------------- 报告
@@ -835,19 +814,25 @@ def process_reports():
         return redirect("/app/results")
     if task_running():
         return redirect("/app/workbench")
-    task_start("reports", "/app/reports")
+    # 请求线程内捕获会话目录、已提取列表与去重基准；线程只写捕获值
+    sid = state["session"]
+    reports_dir = session_sub("reports")
+    upload_dir = session_sub("uploads")
+    config = state["config"]
+    fields = _student_fields()
+    report_uploads = list(state.get("report_uploads") or [])
+    prev = [r for r in state["extracted_reports"] if r.get("status") == "ok"]
+    student_llm = llm(config)
+    t = task_start("reports", "/app/reports")
 
     def work():
         try:
-            prev = [r for r in state["extracted_reports"] if r.get("status") == "ok"]
             prev_names = {r["meta"]["filename"] for r in prev}
             prev_students = {r["meta"]["filename"]: r["meta"].get("student")
                              for r in prev if r["meta"].get("student")}
             seen_hashes = {h for h in (_text_hash(r) for r in prev) if h}
-            extractor = ReportExtractor(session_sub("reports"), state["config"])
-            fields = _student_fields()
-            upload_dir = session_sub("uploads")
-            queued = [os.path.join(upload_dir, n) for n in (state.get("report_uploads") or [])
+            extractor = ReportExtractor(reports_dir, config)
+            queued = [os.path.join(upload_dir, n) for n in report_uploads
                       if os.path.isfile(os.path.join(upload_dir, n))]
             if queued:
                 all_files = queued
@@ -857,53 +842,55 @@ def process_reports():
                                  ("calibration_", "criteria_", "experiment_"))]
             total = len(all_files)
             if not total:
-                task_finish("error", "uploads 目录中没有可处理的报告文件")
+                task_finish(t, "error", "uploads 目录中没有可处理的报告文件")
                 return
-            task_update(total=total, stage="提取报告内容")
+            task_update(t, total=total, stage="提取报告内容")
             kept, dup = [], 0
             for i, fp in enumerate(all_files):
-                if task_cancelled():
-                    task_finish("cancelled")
+                if task_cancelled(t):
+                    task_finish(t, "cancelled")
                     return
                 name = os.path.basename(fp)
-                task_update(progress=90 * i / max(total, 1), detail=name)
+                task_update(t, progress=90 * i / max(total, 1), detail=name)
                 entry = extractor._process_single(fp)
                 if entry.get("status") == "ok":
                     fn = entry["meta"]["filename"]
                     if fn in prev_students:
                         entry["meta"]["student"] = prev_students[fn]
                     elif not entry["meta"].get("student"):
-                        task_update(stage="识别学生信息", detail=name)
-                        entry["meta"]["student"] = _extract_student(entry, fields)
+                        task_update(t, stage="识别学生信息", detail=name)
+                        entry["meta"]["student"] = _extract_student(entry, fields, student_llm)
                         _save_meta(entry)
                     digest = _text_hash(entry)
                     if digest and fn not in prev_names and digest in seen_hashes:
-                        _discard_report(entry, session_sub("uploads"))
+                        _discard_report(entry, upload_dir)
                         dup += 1
-                        task_update(done=i + 1)
+                        task_update(t, done=i + 1)
                         continue
                     if digest:
                         seen_hashes.add(digest)
                 kept.append(entry)
-                task_update(done=i + 1)
-            if task_cancelled():
-                task_finish("cancelled")
+                task_update(t, done=i + 1)
+            if task_cancelled(t):
+                task_finish(t, "cancelled")
                 return
-            state["extracted_reports"] = kept
-            state["report_uploads"] = []
+            # 已切走会话时不动新会话内存：提取物已落旧会话目录，切回时 hydrate 自磁盘重建
+            if state.get("session") == sid:
+                state["extracted_reports"] = kept
+                state["report_uploads"] = []
             detail = f"共 {len(kept)} 份" + (f"，自动去除 {dup} 份重复" if dup else "")
-            task_update(progress=100, stage="完成", detail=detail)
-            task_finish("done")
+            task_update(t, progress=100, stage="完成", detail=detail)
+            task_finish(t, "done")
         except Exception as e:
-            task_finish("cancelled" if task_cancelled() else "error", e)
+            task_finish(t, "cancelled" if task_cancelled(t) else "error", e)
 
     threading.Thread(target=work, daemon=True).start()
     return redirect("/app/workbench")
 
 
 def _save_meta(entry):
-    with open(os.path.join(entry["meta"]["output_dir"], "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(entry["meta"], f, ensure_ascii=False, indent=2)
+    storage.write_json(os.path.join(entry["meta"]["output_dir"], "meta.json"),
+                       entry["meta"], indent=2)
 
 
 def _doc_author(entry):
@@ -925,7 +912,7 @@ def _doc_author(entry):
     return "", ""
 
 
-def _extract_student(entry, fields):
+def _extract_student(entry, fields, client=None):
     head = _read_text(os.path.join(entry["meta"]["output_dir"], "text.md"))[:2500]
     author, title = _doc_author(entry)
     prompt = ("从下面这份实验报告的文件名、文档属性和开头内容中提取学生信息。报告可能是英文的："
@@ -936,7 +923,8 @@ def _extract_student(entry, fields):
               f"文件名：{entry['meta']['filename']}\n文档属性作者：{author or '（无）'}\n"
               f"文档属性标题：{title or '（无）'}\n\n报告开头内容：\n{head}")
     try:
-        data = _json_or_empty(llm(state["config"]).chat([{"role": "user", "content": prompt}]))
+        data = _json_or_empty((client or llm(state["config"]))
+                              .chat([{"role": "user", "content": prompt}]))
     except Exception:
         data = {}
     return {k: str(data.get(k, "") or "").strip() for k in fields}
@@ -963,10 +951,6 @@ def _discard_report(entry, upload_dir):
         except OSError:
             pass
 
-
-@app.route("/reports_list")
-def reports_list():
-    return redirect("/app/reports")
 
 
 @app.route("/report_text/<path:filename>")
@@ -1082,11 +1066,12 @@ def _roster_index(roster):
     return key, values
 
 
-def _classify_students():
-    """返回 (students, suspicious, missing)。"""
+def _classify_students(reports=None, roster=None):
+    """返回 (students, suspicious, missing)。不传参数时读当前会话。"""
+    reports = state["extracted_reports"] if reports is None else reports
     students = {r["meta"]["filename"]: (r["meta"].get("student") or {})
-                for r in state["extracted_reports"] if r.get("status") == "ok"}
-    roster = load_roster()
+                for r in reports if r.get("status") == "ok"}
+    roster = load_roster() if roster is None else roster
     if not roster:
         return students, [], []
     key, values = _roster_index(roster)
@@ -1111,22 +1096,33 @@ def _classify_students():
     return students, suspicious, missing
 
 
-def _export_all():
-    grader = state["grader"]
+def _export_all(grader=None, reports=None, roster=None, external=None, rubric=None):
+    """导出成绩 Excel 与被标记名单。无参时读当前会话（请求线程）；
+    评分线程必须传捕获的参数，避免评分完成后写错会话。"""
+    if grader is None:
+        grader = state["grader"]
+        reports = state["extracted_reports"]
+        roster = load_roster()
+        external = state.get("external") or {}
+        rubric = state.get("rubric_json")
     if not grader:
         return
-    _apply_external()
-    students, suspicious, missing = _classify_students()
+    if external and rubric:
+        students = {r["meta"]["filename"]: (r["meta"].get("student") or {})
+                    for r in reports or []}
+        external_scores.apply_to_results(grader.results, rubric, external, students.get)
+    students_map, suspicious, missing = _classify_students(reports=reports, roster=roster)
     grader.export_results()
-    grader.export_excel(roster=load_roster(), students=students,
+    grader.export_excel(roster=roster, students=students_map,
                         suspicious=suspicious, missing=missing)
-    _export_flagged(suspicious)
+    _export_flagged(suspicious, roster=roster, grading_dir=grader.output_dir)
 
 
-def _export_flagged(suspicious):
+def _export_flagged(suspicious, roster=None, grading_dir=None):
     import openpyxl
-    cols = _student_fields()
-    path = os.path.join(session_sub("grading"), "flagged_students.xlsx")
+    cols = _student_fields() if roster is None else roster["headers"]
+    grading_dir = grading_dir or session_sub("grading")
+    path = os.path.join(grading_dir, "flagged_students.xlsx")
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "被标记人员"
@@ -1135,10 +1131,6 @@ def _export_flagged(suspicious):
         ws.append([(s["student"] or {}).get(c, "") for c in cols] + [s["report_id"], s["reason"]])
     wb.save(path)
 
-
-@app.route("/roster")
-def roster_page():
-    return redirect("/app/roster")
 
 
 @app.route("/roster/upload", methods=["POST"])
@@ -1183,19 +1175,17 @@ def roster_save():
 
 
 # ---------------------------------------------------------------- MCP 插件
-def _mcp_references(query):
-    mount = state.get("mcp") or {}
+def _mcp_references(query, mount=None, sid=None):
+    """拉学科参考资料。mount/sid 由后台线程传入捕获值；只在仍是当前会话时写 mcp_status。"""
+    mount = mount if mount is not None else (state.get("mcp") or {})
     if not mount.get("servers"):
         return ""
     servers = mcp_store.load_servers()
     text, status = mcp_client.collect(servers, mount, query)
-    state["mcp_status"] = status
+    if sid is None or sid == state.get("session"):
+        state["mcp_status"] = status
     return text
 
-
-@app.route("/mcp")
-def mcp_page():
-    return redirect("/app/mcp")
 
 
 @app.route("/mcp/add", methods=["POST"])
@@ -1279,8 +1269,7 @@ def _image_entries(entry):
                     text = engine.recognize_file(os.path.join(report_dir, "images", name))
                 except Exception:
                     text = ""
-            with open(cache_path, "w", encoding="utf-8") as f:
-                f.write(text)
+            storage.write_text(cache_path, text)
         entries.append({"id": name, "text": text or image.get("context") or name})
     return entries
 
@@ -1289,12 +1278,14 @@ def _image_descriptions(entries):
     return "\n".join(f"- 图 {e['id']}：{e['text'][:200]}" for e in entries[:20]) or ""
 
 
-def _grade_one(grader, entry, references=""):
+def _grade_one(grader, entry, references="", corrections=None):
     from .web import usage as usage_store
 
     text = _report_text(entry)
     if not text.strip():
         return None
+    # corrections 由评分轮次捕获传入（会话隔离）；同步调用缺省读当前会话
+    corrections = corrections if corrections is not None else state["corrections"]
     filename = entry["meta"]["filename"]
     # 这段期间的所有模型调用都记到这份报告名下，用于「每份报告成本」
     usage_store.set_report(filename)
@@ -1303,8 +1294,9 @@ def _grade_one(grader, entry, references=""):
         image_entries = _image_entries(entry)
         chunks = _chunks(text)
         chunk_entries = [{"id": f"p{i}", "text": c[:300]} for i, c in enumerate(chunks)]
-        corrections = state["corrections"].get(filename)
-        grade_text = text + (f"\n\n[教师修改意见，本次重评须重点回应] {corrections}" if corrections else "")
+        correction_text = corrections.get(filename)
+        grade_text = text + (f"\n\n[教师修改意见，本次重评须重点回应] {correction_text}"
+                             if correction_text else "")
 
         # 重评且正文、维度名都没变：归类结果可复用，省掉一次模型调用
         criterion_names = {c["name"] for c in grader.rubric.get("criteria", [])}
@@ -1352,8 +1344,9 @@ def _grade_one(grader, entry, references=""):
         text_assignments = {k: v for k, v in assignments.items() if k.startswith("p")}
         image_assignments = {k: v for k, v in assignments.items() if not k.startswith("p")}
         result = outcome["result"]
-        state["corrections"].pop(filename, None)
         if result.get("status") == "graded":
+            # 成功才消费教师意见；llm_failed 时保留，重评继续生效
+            corrections.pop(filename, None)
             result["_report_text"] = text
             result["_report_chunks"] = chunks
             result["images"] = images
@@ -1371,7 +1364,7 @@ def _grading_workers():
         return 3
 
 
-def _grade_targets(grader, targets, references, status):
+def _grade_targets(grader, targets, references, status, corrections=None):
     """按报告并行；并发数受 ERG_GRADING_WORKERS 限制，取消后不再派新任务。"""
     workers = _grading_workers()
     if workers <= 1 or len(targets) <= 1:
@@ -1380,7 +1373,7 @@ def _grade_targets(grader, targets, references, status):
                 return
             status["current"] = entry["meta"]["filename"]
             try:
-                _grade_one(grader, entry, references)
+                _grade_one(grader, entry, references, corrections)
             except Exception as e:  # 单份失败不拖垮整轮
                 grader.record_failure(entry["meta"]["filename"], e)
             status["done"] = status.get("done", 0) + 1
@@ -1395,7 +1388,7 @@ def _grade_targets(grader, targets, references, status):
             entry = next(queue)
         except StopIteration:
             return
-        pending[pool.submit(_grade_one, grader, entry, references)] = entry
+        pending[pool.submit(_grade_one, grader, entry, references, corrections)] = entry
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="grade") as pool:
         for _ in range(min(workers, len(targets))):
@@ -1413,27 +1406,40 @@ def _grade_targets(grader, targets, references, status):
                 submit(pool)
 
 
-def _spawn_grading(target_fn):
+def _spawn_grading(sid, grader, targets, corrections, reports, roster,
+                  external, rubric_json, mount):
+    """会话隔离的评分线程：所有依赖在请求线程内捕获。线程只更新自己持有的
+    status dict（登记在 RUNNING_STATUS[sid]），绝不读写 state 里的其他会话数据。"""
+    status = {"phase": "running", "done": 0, "total": len(targets), "current": "",
+              "cancel": False, "message": "", "workers": _grading_workers()}
+    RUNNING_STATUS[sid] = status
+    if state.get("session") == sid:
+        state["grading_status"] = status
+    memory_dir = os.path.join(session_dir(sid), "memory")
+    storage.write_json(os.path.join(memory_dir, "grading_status.json"), status)
+
     def work():
-        grader = state["grader"]
         try:
-            targets = target_fn()
-            state["grading_status"] = {"phase": "running", "done": 0, "total": len(targets),
-                                       "current": "", "cancel": False, "message": "",
-                                       "workers": _grading_workers()}
             references = _mcp_references(" ".join(
-                c["name"] for c in (state.get("rubric_json") or {}).get("criteria", [])))
-            state["mcp_refs"] = references
-            _grade_targets(grader, targets, references, state["grading_status"])
+                c["name"] for c in (rubric_json or {}).get("criteria", [])),
+                mount=mount, sid=sid)
+            if state.get("session") == sid:
+                state["mcp_refs"] = references
+            _grade_targets(grader, targets, references, status, corrections)
             grader.export_results()
-            _export_all()
-            if state["grading_status"].get("cancel"):
-                state["grading_status"].update(phase="cancelled", current="",
-                                               message="已取消，未评分的报告可重新开始评分")
+            _export_all(grader=grader, reports=reports, roster=roster,
+                        external=external, rubric=rubric_json)
+            if status.get("cancel"):
+                status.update(phase="cancelled", current="",
+                              message="已取消，未评分的报告可重新开始评分")
             else:
-                state["grading_status"].update(phase="done", current="", message="全部完成")
+                status.update(phase="done", current="", message="全部完成")
         except Exception as e:
-            state["grading_status"] = {"phase": "error", "message": str(e)[:300], "done": 0, "total": 0}
+            status.update({"phase": "error", "message": str(e)[:300], "done": 0, "total": 0})
+        finally:
+            # 终态与教师意见落存储：重启/切课后仍可看到本轮结果与未消费的意见
+            storage.write_json(os.path.join(memory_dir, "grading_status.json"), status)
+            storage.write_json(os.path.join(session_dir(sid), "corrections.json"), corrections)
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -1496,10 +1502,6 @@ def _select_context(error=None):
             "rubric_confirmed": _rubric_confirmed()}
 
 
-@app.route("/grading_select")
-def grading_select():
-    return redirect("/app/select")
-
 
 @app.route("/start_grading", methods=["POST"])
 def start_grading():
@@ -1548,17 +1550,16 @@ def start_grading():
                                  similarity_scope=state.get("session"), kb_session_dir=session_dir())
         # 保留旧结果，评完由 _finish 覆盖；中途取消不至于丢掉上一轮成绩
         state["grader"].results = prev_results
-        state["grading_status"] = {"phase": "running", "done": 0, "total": len(targets), "current": ""}
-        _spawn_grading(lambda: targets)
+        _spawn_grading(
+            sid=state["session"], grader=state["grader"], targets=targets,
+            corrections=state["corrections"], reports=state["extracted_reports"],
+            roster=roster, external=state.get("external") or {},
+            rubric_json=state.get("rubric_json"), mount=dict(state.get("mcp") or {}))
     if wants_json:
         return jsonify({"ok": True, "started": len(targets),
                         "files": [t["meta"]["filename"] for t in targets]})
     return redirect("/app/results")
 
-
-@app.route("/grading_progress")
-def grading_progress():
-    return redirect("/app/results")
 
 
 @app.route("/grading_status")
@@ -1587,12 +1588,17 @@ def regrade(filename):
         corrections = request.form.get("corrections", "").strip()
         if corrections:
             state["corrections"][filename] = corrections
+            storage.write_json(os.path.join(session_dir(), "corrections.json"),
+                               state["corrections"])
         state["grader"].rubric = _coerce_rubric(state.get("rubric_json") or state.get("rubric") or "")
         state["grader"].results = [r for r in state["grader"].results if r["report_id"] != filename]
         state["approved_ids"] = _approved_ids() - {filename}
         save_approved(state["approved_ids"])
-        state["grading_status"] = {"phase": "running", "done": 0, "total": 1, "current": filename}
-        _spawn_grading(lambda: [entry])
+        _spawn_grading(
+            sid=state["session"], grader=state["grader"], targets=[entry],
+            corrections=state["corrections"], reports=state["extracted_reports"],
+            roster=load_roster(), external=state.get("external") or {},
+            rubric_json=state.get("rubric_json"), mount=dict(state.get("mcp") or {}))
     return redirect("/app/results")
 
 
@@ -1659,10 +1665,6 @@ def approve_report(filename):
     _export_all()
     return redirect(request.form.get("next") or "/app/results")
 
-
-@app.route("/grading_done")
-def grading_done():
-    return redirect("/app/results")
 
 # ---------------------------------------------------------------- 配置
 @app.route("/settings", methods=["GET", "POST"])
@@ -2144,7 +2146,8 @@ def api_calibration_submit():
     teacher = {name: {"level": level, "evidence": "", "reasoning": str(reasons.get(name, "")).strip()}
                for name, level in levels.items() if level in VALID_LEVELS}
     grader = Grader(state["rubric_json"], llm_client=llm(state["config"]), config=state["config"],
-                    similarity_scope=state.get("session"))
+                    similarity_scope=state.get("session"),
+                    kb_session_dir=os.path.join(session_dir(), "calibration_kb"))
     outcome = grader.grade_single("calibration", calib["text"], references=_mcp_references("校准"))
     result = outcome["result"]
     if result.get("status") != "graded":
