@@ -1,7 +1,6 @@
-"""checked"""
 import os
-import json
 from datetime import datetime
+from .. import storage
 from ..utils.file_parser import (
     detect_archive_type, extract_archive, extract_pdf, extract_docx, extract_markdown,
     extract_doc, collect_report_files
@@ -55,8 +54,7 @@ class ReportExtractor:
 
         meta["extract_time"] = datetime.now().isoformat()
         meta["output_dir"] = output_dir
-        with open(os.path.join(output_dir, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
+        storage.write_json(os.path.join(output_dir, "meta.json"), meta, indent=2)
         return {"status": "ok", "file": filepath, "meta": meta, "images": images}
 
     def _process_archive(self, filepath, dest_dir):

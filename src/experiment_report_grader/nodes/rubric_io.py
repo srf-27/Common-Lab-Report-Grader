@@ -1,6 +1,7 @@
 import difflib
-import json
 import os
+
+from .. import storage
 
 LEVELS = ("A", "B", "C", "D", "E")
 RUBRIC_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "output", "rubrics", "rubric_current.json")
@@ -41,18 +42,15 @@ def normalize_weights(criteria):
 
 def save_rubric_json(rubric, path=None):
     path = path or RUBRIC_JSON_PATH
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(rubric, f, ensure_ascii=False, indent=2)
+    storage.write_json(path, rubric, indent=2)
     return path
 
 
 def load_rubric_json(path=None):
     path = path or RUBRIC_JSON_PATH
-    if not os.path.exists(path):
+    if not storage.exists(path):
         return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return storage.read_json(path)
 
 
 def criteria_to_markdown(rubric, title="实验报告评分细则 (Rubric)"):

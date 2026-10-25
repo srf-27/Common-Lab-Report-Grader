@@ -6,6 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from .. import storage
 from ..embedding import Chroma, create_embedding_function
 from ..factory import llm as make_llm
 from ..utils.content_safety import check_content_safety
@@ -125,8 +126,7 @@ class Grader:
         with self._cache_lock:
             if self._checks_cache is None:
                 try:
-                    with open(self._checks_path(), encoding="utf-8") as f:
-                        self._checks_cache = json.load(f)
+                    self._checks_cache = storage.read_json(self._checks_path(), {}) or {}
                 except Exception:
                     self._checks_cache = {}
             return self._checks_cache
@@ -137,13 +137,8 @@ class Grader:
             keep = sorted(cache.items(), key=lambda kv: kv[1].get("at", 0))[-1000:]
             cache = dict(keep)
             self._checks_cache = cache
-        path = self._checks_path()
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False)
-            os.replace(tmp, path)
+            storage.write_json(self._checks_path(), cache)
         except Exception:
             pass
 
@@ -618,8 +613,7 @@ class Grader:
     # ---------- 导出 ----------
     def export_results(self):
         path = os.path.join(self.output_dir, "grading_results.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.results, f, ensure_ascii=False, indent=2)
+        storage.write_json(path, self.results, indent=2)
         return path
 
     def export_excel(self, roster=None, students=None, suspicious=None, missing=None):
