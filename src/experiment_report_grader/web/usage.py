@@ -1,8 +1,8 @@
 """按课程统计模型 token 与费用：写 <课程>/usage.json，切换课程互不影响。
 
-价格按 DeepSeek V4 的峰谷计价（2026-08-17 起）：高峰 9:00-12:00 / 14:00-18:00，
-其余时段五折；单位是「元 / 百万 token」，缓存命中与未命中分开算。
-换别的厂商改 PRICES，或用 LLM_PRICE_HIT / LLM_PRICE_MISS / LLM_PRICE_OUT 覆盖。
+计价的获取与计算方式对齐 cc-switch：四槽单价（输入/输出/缓存读/缓存写）× 各项
+token ÷ 1e6，价目优先级 用户覆盖 > models.dev 同步（≤6h）> 内置表，见 web/pricing.py。
+无定价模型金额记 0 并标 unpriced；币种随价目（事件带 cur 字段）。
 """
 
 import os
@@ -11,18 +11,8 @@ import time
 
 from .. import storage
 from ..utils.llm_client import LLMClient, openai_client
+from . import pricing
 
-# (缓存命中输入, 缓存未命中输入, 输出)，单位：元 / 百万 token，均为高峰价
-PRICES = {
-    "v4-pro": (0.30, 9.0, 27.0),
-    "v4-flash": (0.10, 3.0, 9.0),
-    "deepseek": (0.10, 3.0, 9.0),
-    "gpt-4o-mini": (0.15, 1.1, 4.4),
-    "gpt-4o": (2.5, 18.0, 72.0),
-    "qwen": (0.2, 0.8, 2.0),
-}
-DEFAULT_PRICES = (0.10, 3.0, 9.0)
-PEAK_HOURS = ((9, 12), (14, 18))
 MAX_EVENTS = 600
 
 _LOCK = threading.Lock()
@@ -36,31 +26,6 @@ def set_report(report_id=None):
 
 def current_report():
     return getattr(_CTX, "report", None)
-
-
-def is_peak(ts=None):
-    hour = time.localtime(ts or time.time()).tm_hour
-    return any(start <= hour < end for start, end in PEAK_HOURS)
-
-
-def rates_for(model, ts=None):
-    env = (os.environ.get("LLM_PRICE_HIT"), os.environ.get("LLM_PRICE_MISS"),
-           os.environ.get("LLM_PRICE_OUT"))
-    if all(env):
-        try:
-            return tuple(float(x) for x in env)
-        except ValueError:
-            pass
-    name = (model or "").lower()
-    for key, rates in PRICES.items():
-        if key in name:
-            return rates if is_peak(ts) else tuple(rate / 2 for rate in rates)
-    return DEFAULT_PRICES if is_peak(ts) else tuple(rate / 2 for rate in DEFAULT_PRICES)
-
-
-def cost_of(model, tokens_hit, tokens_miss, tokens_out, ts=None):
-    hit, miss, out = rates_for(model, ts)
-    return (tokens_hit * hit + tokens_miss * miss + tokens_out * out) / 1_000_000
 
 
 def empty():
@@ -84,9 +49,13 @@ def load(session_dir):
     repriced = False
     for event in data["events"]:
         if event.get("src") == "legacy" and not event.get("priced"):
-            event["cost"] = round(cost_of(event.get("m"), event.get("c") or 0,
+            amount, cur = pricing.cost_of(event.get("m"),
                                           (event.get("i") or 0) - (event.get("c") or 0),
-                                          event.get("o") or 0, event.get("t")), 6)
+                                          event.get("c") or 0, 0, event.get("o") or 0)
+            if amount is None:
+                amount = 0.0
+            event["cost"] = round(amount, 6)
+            event["cur"] = cur or "USD"
             event["priced"] = True
             repriced = True
     if repriced:
@@ -134,7 +103,11 @@ def record(session_dir, model, tokens_in, tokens_cached, tokens_out,
            ms=0, status="ok", source=""):
     tokens_cached = min(max(0, tokens_cached), tokens_in)
     now = time.time()
-    amount = cost_of(model, tokens_cached, tokens_in - tokens_cached, tokens_out, now)
+    amount, currency = pricing.cost_of(model, tokens_in - tokens_cached, tokens_cached,
+                                       0, tokens_out)
+    unpriced = amount is None
+    if unpriced:
+        amount = 0.0
     with _LOCK:
         data = load(session_dir)
         data["cost"] = round(data["cost"] + amount, 6)
@@ -150,6 +123,7 @@ def record(session_dir, model, tokens_in, tokens_cached, tokens_out,
             "t": int(now), "m": model or "-", "i": int(tokens_in), "c": int(tokens_cached),
             "o": int(tokens_out), "cost": round(amount, 6), "ms": int(ms),
             "s": status, "src": source, "r": current_report(),
+            "cur": currency or "-", "unpriced": unpriced or None,
         })
         data["events"] = data["events"][-MAX_EVENTS:]
         _write(session_dir, data)
@@ -204,8 +178,9 @@ def payload(session_dir, days=1, model=None):
 
     saving = 0.0
     for event in events:
-        hit_rate, miss_rate, _ = rates_for(event.get("m"), event.get("t"))
-        saving += (event.get("c") or 0) * (miss_rate - hit_rate) / 1_000_000
+        price = pricing.lookup(event.get("m"))
+        if price:
+            saving += (event.get("c") or 0) * (price["input"] - price["cache_read"]) / 1_000_000
     attributed = [e for e in events if e.get("r")]
     reports = len({e["r"] for e in attributed})
     report_cost = round(sum(e["cost"] for e in attributed), 6)
@@ -218,6 +193,12 @@ def payload(session_dir, days=1, model=None):
     summary["cost_per_report"] = round(report_cost / reports, 4) if reports else None
     summary["seq"] = data["seq"]
     summary["model"] = data["model"]
+    by_currency = {}
+    for event in events:
+        cur = event.get("cur") or "USD"
+        by_currency[cur] = round(by_currency.get(cur, 0.0) + (event.get("cost") or 0), 6)
+    summary["cost_by_currency"] = by_currency
+    summary["unpriced_calls"] = sum(1 for e in events if e.get("unpriced"))
 
     buckets, models = {}, {}
     if days == 1:
@@ -264,18 +245,13 @@ def payload(session_dir, days=1, model=None):
         "events": sorted(events, key=lambda e: e["t"], reverse=True)[:200],
         "buckets": sorted(buckets.values(), key=lambda b: b["t"]),
         "models": sorted(models.values(), key=lambda m: m["cost"], reverse=True),
-        "prices": [{"model": key, "hit": value[0], "miss": value[1], "out": value[2]}
-                   for key, value in PRICES.items()],
-        "peak": is_peak(now),
+        "pricing_source": "models.dev（同步）+ 内置快照，覆盖见 data/output/pricing_overrides.json",
         "now": now,
     }
 
 
 class MeteredLLM(LLMClient):
-    """记录用量后再返回原文，行为与 LLMClient 完全一致。
-
-    shortcut: _call_openai 与 llm_client.py 各存一份，llm_client 改请求参数时这里要同步。
-    """
+    """记录用量后再返回原文，行为与 LLMClient 完全一致。"""
 
     def __init__(self, config=None):
         super().__init__(config)
@@ -290,41 +266,33 @@ class MeteredLLM(LLMClient):
             record(session_dir(self.session_id), model, tokens_in, tokens_cached,
                    tokens_out, ms=ms, status=status, source=self.backend)
 
-    def _call_openai(self, messages, temperature):
-        cfg = self.config["openai"]
-        api_key = os.environ.get(cfg["api_key"], cfg["api_key"])
-        client = openai_client(api_key, cfg.get("base_url"))
-        started = time.perf_counter()
-        try:
-            resp = client.chat.completions.create(
-                model=cfg["model"],
-                messages=messages,
-                temperature=temperature,
-                max_tokens=cfg.get("max_tokens"),
-            )
-        except Exception:
-            self._bump(cfg["model"], 0, 0, 0, int((time.perf_counter() - started) * 1000), "error")
-            raise
-        ms = int((time.perf_counter() - started) * 1000)
-        content = resp.choices[0].message.content
-        usage = getattr(resp, "usage", None)
-        if usage is None:
-            prompt = "".join(str(m.get("content", "")) for m in messages)
-            self._bump(cfg["model"], estimate(prompt), 0, estimate(content or ""), ms)
-        else:
-            cached = _cached_tokens(usage)
-            self._bump(
-                cfg["model"],
-                getattr(usage, "prompt_tokens", 0) or 0,
-                cached,
-                getattr(usage, "completion_tokens", 0) or 0,
-                ms,
-            )
-        return content
+    def _chat_openai(self, messages, temperature, tools=None, tool_executor=None,
+                     max_tokens=None):
+        def bill(resp, started, status="ok"):
+            if not self.session_id:
+                return
+            model = self.config["openai"]["model"]
+            ms = int((time.perf_counter() - started) * 1000)
+            if resp is None:
+                self._bump(model, 0, 0, 0, ms, "error")
+                return
+            content = resp.choices[0].message.content or ""
+            usage = getattr(resp, "usage", None)
+            if usage is None:
+                prompt = "".join(str(m.get("content", "")) for m in messages)
+                self._bump(model, estimate(prompt), 0, estimate(content), ms)
+            else:
+                self._bump(model, getattr(usage, "prompt_tokens", 0) or 0,
+                           _cached_tokens(usage),
+                           getattr(usage, "completion_tokens", 0) or 0, ms)
 
-    def chat(self, messages, temperature=0.3, retries=2):
+        return super()._chat_openai(messages, temperature, tools=tools,
+                                    tool_executor=tool_executor, max_tokens=max_tokens,
+                                    on_response=bill)
+
+    def chat(self, messages, temperature=0.3, retries=2, **kwargs):
         started = time.perf_counter()
-        text = super().chat(messages, temperature=temperature, retries=retries)
+        text = super().chat(messages, temperature=temperature, retries=retries, **kwargs)
         if self.backend != "openai" and text:
             model = (self.config.get(self.backend) or {}).get("model", self.backend)
             prompt = "".join(str(m.get("content", "")) for m in messages)
