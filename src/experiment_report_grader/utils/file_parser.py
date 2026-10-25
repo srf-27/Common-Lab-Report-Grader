@@ -22,6 +22,11 @@ ARCHIVE_SIGNATURES = {
 
 REPORT_EXTENSIONS = {".pdf", ".docx", ".doc", ".md"}
 
+# 本地解析器不处理、可由 markitdown MCP 兜底转换的格式
+MARKITDOWN_EXTENSIONS = {".html", ".htm", ".pptx", ".xlsx", ".epub"}
+
+COLLECT_EXTENSIONS = REPORT_EXTENSIONS | MARKITDOWN_EXTENSIONS
+
 
 def detect_archive_type(filepath):
     """按扩展名判断压缩包类型，扩展名不可信时按文件头兜底，其他返回 None。"""
@@ -323,7 +328,7 @@ def _sanitize_filename(name):
 
 
 def collect_report_files(directory):
-    supported = {*REPORT_EXTENSIONS, *ARCHIVE_EXTENSIONS}
+    supported = {*COLLECT_EXTENSIONS, *ARCHIVE_EXTENSIONS}
     files = []
     for root, _, filenames in os.walk(directory):
         for fn in filenames:

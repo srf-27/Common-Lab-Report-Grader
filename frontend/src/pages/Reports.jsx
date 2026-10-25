@@ -203,15 +203,15 @@ export default function Reports() {
 
       <Group
         title="上传报告"
-        note="PDF / DOCX / DOC / MD / ZIP"
+        note="PDF / DOCX / DOC / MD / ZIP；HTML / PPTX / XLSX / EPUB 经 markitdown 插件转换"
         footer="提取会解析正文、插图与学生信息；扫描页调用 OCR。同一学生在评分时只能选一份。"
       >
         <Dropzone
-          accept=".pdf,.docx,.doc,.md,.zip,.rar,.7z"
+          accept=".pdf,.docx,.doc,.md,.zip,.rar,.7z,.html,.htm,.pptx,.xlsx,.epub"
           multiple
           selected={files}
           title="拖拽报告到这里"
-          hint="支持 PDF / DOCX / DOC / MD / ZIP；可多选，也可整包拖入"
+          hint="支持 PDF / DOCX / DOC / MD / ZIP；HTML / PPTX / XLSX / EPUB 走 markitdown 转换；可多选，也可整包拖入"
           onFiles={setFiles}
           disabled={polling}
         />
