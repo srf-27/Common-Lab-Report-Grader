@@ -18,8 +18,8 @@ def _snapshot(sid, t):
     if sid:
         try:
             from .state import session_dir
-            storage.write_json(
-                os.path.join(session_dir(sid), "memory", "task.json"), dict(t))
+            data = {k: v for k, v in t.items() if k != "thinking"}
+            storage.write_json(os.path.join(session_dir(sid), "memory", "task.json"), data)
         except Exception:
             pass
 
@@ -45,7 +45,7 @@ def task_start(kind, redirect, total=0, sid=None, mode="bar"):
     return t
 
 
-def task_update(t, progress=None, stage=None, detail=None, done=None, total=None):
+def task_update(t, progress=None, stage=None, detail=None, done=None, total=None, thinking=None):
     if not t:
         return
     with task_lock:
@@ -59,6 +59,8 @@ def task_update(t, progress=None, stage=None, detail=None, done=None, total=None
             t["done"] = done
         if total is not None:
             t["total"] = total
+        if thinking:
+            t["thinking"] = ((t.get("thinking") or "") + thinking)[-600:]
 
 
 def task_cancelled(t):

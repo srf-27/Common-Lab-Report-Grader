@@ -53,6 +53,46 @@ class LLMClient:
                 last_err = e
         raise RuntimeError(f"LLM chat failed after {retries} attempts: {last_err}")
 
+    def chat_stream(self, messages, temperature=0.3):
+        """流式对话：逐段 yield ("thinking"|"answer", 增量文本)，末尾 yield ("usage", usage对象)。
+
+        仅 openai 后端真流式（思考型模型的 reasoning_content 走 thinking 事件）；
+        ollama/custom 或网关不支持流式时退化为一次性 answer 事件，调用方无感。
+        """
+        if self.backend != "openai":
+            yield "answer", self.chat(messages, temperature=temperature)
+            yield "usage", {}
+            return
+        cfg = self.config["openai"]
+        api_key = os.environ.get(cfg["api_key"], cfg["api_key"])
+        client = openai_client(api_key, cfg.get("base_url"))
+        try:
+            stream = client.chat.completions.create(
+                model=cfg["model"], messages=messages, temperature=temperature,
+                max_tokens=cfg.get("max_tokens"), stream=True,
+                stream_options={"include_usage": True})
+        except Exception:
+            # 个别网关不认 stream_options 或不支持流式：退回非流式
+            yield "answer", self._call_openai(messages, temperature)
+            yield "usage", {}
+            return
+        usage = {}
+        for chunk in stream:
+            u = getattr(chunk, "usage", None)
+            if u is not None:
+                usage = u
+                continue
+            for choice in chunk.choices or []:
+                delta = choice.delta or {}
+                reasoning = getattr(delta, "reasoning_content", None)
+                if not reasoning:
+                    reasoning = (getattr(delta, "model_extra", None) or {}).get("reasoning_content")
+                if reasoning:
+                    yield "thinking", reasoning
+                if delta.content:
+                    yield "answer", delta.content
+        yield "usage", usage
+
     def _call_openai(self, messages, temperature):
         cfg = self.config["openai"]
         api_key = os.environ.get(cfg["api_key"], cfg["api_key"])

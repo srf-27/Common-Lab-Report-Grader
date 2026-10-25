@@ -310,6 +310,30 @@ def criteria_clear():
     return jsonify({"ok": True, "removed": removed})
 
 
+class _ThinkingTap:
+    """LLM 客户端包装：流式调用的思考/生成增量实时写入任务进度，其余行为不变。"""
+
+    def __init__(self, client, task):
+        self._client = client
+        self._task = task
+        self._saw_thinking = False
+
+    def chat(self, messages, temperature=0.3, retries=2):
+        answer = []
+        try:
+            for kind, payload in self._client.chat_stream(messages, temperature=temperature):
+                if kind == "thinking" and payload:
+                    self._saw_thinking = True
+                    task_update(self._task, thinking=payload)
+                elif kind == "answer" and payload:
+                    answer.append(payload)
+                    if not self._saw_thinking:
+                        task_update(self._task, thinking=payload)
+            return "".join(answer)
+        except Exception:
+            return self._client.chat(messages, temperature=temperature, retries=retries)
+
+
 @app.route("/process_criteria", methods=["POST"])
 def process_criteria():
     filepath = state.get("criteria_upload")
@@ -332,9 +356,10 @@ def process_criteria():
     experiment_path = state.get("criteria_experiment")
     rubrics_dir = os.path.join(session_path, "rubrics")
     os.makedirs(rubrics_dir, exist_ok=True)
-    generator = RubricGenerator(llm_client=llm(state["config"]), output_dir=rubrics_dir)
     t = task_start("criteria", "/app/rubric", mode="stage")
     task_update(t, detail=f"已上传 {os.path.basename(filepath)}")
+    generator = RubricGenerator(llm_client=_ThinkingTap(llm(state["config"]), t),
+                                output_dir=rubrics_dir)
 
     def work():
         try:

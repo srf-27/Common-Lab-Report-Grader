@@ -332,3 +332,26 @@ class MeteredLLM(LLMClient):
             self._bump(model, estimate(prompt), 0, estimate(text),
                        int((time.perf_counter() - started) * 1000))
         return text
+
+    def chat_stream(self, messages, temperature=0.3):
+        """流式版计费：事件原样透传，聚合 answer 与 usage 记账（缺失 usage 时按字符估算）。"""
+        started = time.perf_counter()
+        model = (self.config.get("openai") or {}).get("model", "-")
+        answer, usage = [], None
+        try:
+            for kind, payload in super().chat_stream(messages, temperature=temperature):
+                if kind == "answer" and payload:
+                    answer.append(payload)
+                elif kind == "usage" and payload:
+                    usage = payload
+                yield kind, payload
+        except Exception:
+            self._bump(model, 0, 0, 0, int((time.perf_counter() - started) * 1000), "error")
+            raise
+        ms = int((time.perf_counter() - started) * 1000)
+        if usage is not None:
+            self._bump(model, getattr(usage, "prompt_tokens", 0) or 0,
+                       _cached_tokens(usage), getattr(usage, "completion_tokens", 0) or 0, ms)
+        else:
+            prompt = "".join(str(m.get("content", "")) for m in messages)
+            self._bump(model, estimate(prompt), 0, estimate("".join(answer)), ms)

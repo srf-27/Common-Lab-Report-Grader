@@ -391,6 +391,13 @@ export default function Rubric() {
   };
 
   const progress = task?.progress || 0;
+  const thinkingRef = useRef(null);
+
+  useEffect(() => {
+    if (thinkingRef.current) {
+      thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
+    }
+  }, [task?.thinking]);
 
   return (
     <>
@@ -461,6 +468,29 @@ export default function Rubric() {
                   {task.detail ? (
                     <div className="t-footnote c-secondary" style={{ marginTop: 6, whiteSpace: "normal" }}>
                       {task.detail}
+                    </div>
+                  ) : null}
+                  {task.thinking ? (
+                    <div style={{ marginTop: 8 }}>
+                      <div className="t-footnote c-secondary">
+                        {task.status === "running" ? "模型思考 · 实时" : "思考过程"}
+                      </div>
+                      <div
+                        ref={thinkingRef}
+                        className="t-mono t-footnote c-secondary"
+                        style={{
+                          marginTop: 4,
+                          maxHeight: 160,
+                          overflowY: "auto",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          opacity: 0.85,
+                          borderLeft: "2px solid var(--fill-3, rgba(127,127,127,.25))",
+                          paddingLeft: 8,
+                        }}
+                      >
+                        {task.thinking}
+                      </div>
                     </div>
                   ) : null}
                   {task.status === "error" ? (
