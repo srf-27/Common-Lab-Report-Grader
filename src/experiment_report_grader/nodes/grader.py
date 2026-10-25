@@ -100,9 +100,16 @@ class Grader:
         self._embedding_lock = threading.RLock()
         self._embedding_cache = {}
         try:
-            self.parallel_checks = int(os.environ.get("ERG_GRADING_WORKERS", "3")) > 1
+            env_workers = int(os.environ.get("ERG_GRADING_WORKERS", "3"))
         except ValueError:
-            self.parallel_checks = True
+            env_workers = 3
+        # config 的 grading.workers（网页可配）优先于环境变量；一律 clamp 1..8
+        cfg_workers = (config or {}).get("grading", {}).get("workers")
+        try:
+            cfg_workers = max(1, min(8, int(cfg_workers))) if cfg_workers is not None else None
+        except (TypeError, ValueError):
+            cfg_workers = None
+        self.parallel_checks = (cfg_workers or env_workers) > 1
         self.session_scope = similarity_scope or "default"
         vector_cfg = self.config.get("vector_store") or {}
         self._vector_cfg = vector_cfg
@@ -571,6 +578,8 @@ class Grader:
         names = [c["name"] for c in self.rubric.get("criteria", [])]
         normalized = {name: raw_scores[name] for name in names if name in raw_scores}
         for name, entry in raw_scores.items():
+            if name in normalized:
+                continue  # 已精确命中的不再模糊映射，否则「半机械项」会经包含匹配覆盖「机械项」
             match = match_criterion(name, [v for v in names if v not in normalized])
             if match:
                 normalized[match] = entry
