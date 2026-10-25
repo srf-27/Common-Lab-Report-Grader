@@ -17,6 +17,7 @@ data/uploads/
 
 # Private config (contains API keys, repo only keeps config/config.example.yaml)
 config/config.yaml
+config/mcp.yaml
 
 # Business materials
 docs/materials/
