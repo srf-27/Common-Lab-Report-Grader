@@ -4,6 +4,8 @@
 - key = 会话目录下的相对路径（POSIX 风格）；文件后端映射回磁盘路径，PG 后端映射到
   session_kv 表的一行。路径不在 sessions 目录下（config.yaml、Excel 导出等）时直接走文件。
 - PG 存 jsonb：JSON 原样入库；纯文本（.txt/.md）以 JSON 字符串形式入库，读取时解包。
+- PG 模式下文件作热镜像：写双落（PG 为主）、读先 PG 未命中再回退文件（上传原件等由
+  web 层直落盘的内容仍可读）、删双清——保证 PG 与直读磁盘的调用方始终一致。
 - 静默降级：psycopg 未安装、连接失败或执行出错 → 打一条日志并永久回退文件后端，
   保证没装 PG 的环境行为与原来完全一致。
 - 首次连上 PG 时做一次性迁移：把 sessions 目录下已有的 .json/.txt/.md 导入
@@ -169,7 +171,9 @@ def read_json(path, default=None):
         if resolved:
             try:
                 value = _pg_get(*resolved)
-                return value if value is not None else default
+                if value is not None:
+                    return value
+                # PG 未命中 → 回退读文件镜像（上传原件等由 web 层直接落盘的内容）
             except Exception as e:
                 _degrade(e)
     try:
@@ -185,14 +189,11 @@ def write_json(path, data, indent=None):
         if resolved:
             try:
                 _pg_put(resolved[0], resolved[1], data)
+                _mirror_file(path, data, indent)  # 文件热镜像，兼顾直接读盘的调用方
                 return
             except Exception as e:
                 _degrade(e)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=indent)
-    os.replace(tmp, path)
+    _write_file(path, data, indent)
 
 
 def read_text(path, default=""):
@@ -201,10 +202,9 @@ def read_text(path, default=""):
         if resolved:
             try:
                 value = _pg_get(*resolved)
-                if value is None:
-                    return default
-                # 文本以 JSON 字符串入库
-                return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+                if value is not None:
+                    # 文本以 JSON 字符串入库
+                    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
             except Exception as e:
                 _degrade(e)
     try:
@@ -220,14 +220,11 @@ def write_text(path, text):
         if resolved:
             try:
                 _pg_put(resolved[0], resolved[1], text)
+                _mirror_text(path, text)
                 return
             except Exception as e:
                 _degrade(e)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    _write_text_file(path, text)
 
 
 def exists(path):
@@ -235,7 +232,9 @@ def exists(path):
         resolved = _resolve(path)
         if resolved:
             try:
-                return _pg_exists(*resolved)
+                if _pg_exists(*resolved):
+                    return True
+                return os.path.exists(path)  # 直落盘的上传原件等
             except Exception as e:
                 _degrade(e)
     return os.path.exists(path)
@@ -247,17 +246,47 @@ def remove(path):
         if resolved:
             try:
                 _pg_delete(*resolved)
-                return
             except Exception as e:
                 _degrade(e)
     try:
-        os.remove(path)
+        os.remove(path)  # 镜像与 PG 双清，避免陈旧文件在读取回退时复活
     except OSError:
         pass
 
 
 def backend_name():
     return _backend
+
+
+# ---------------------------------------------------------------- 文件镜像
+def _mirror_file(path, data, indent):
+    try:
+        _write_file(path, data, indent)
+    except OSError:
+        pass  # 镜像失败不影响 PG 主写
+
+
+def _mirror_text(path, text):
+    try:
+        _write_text_file(path, text)
+    except OSError:
+        pass
+
+
+def _write_file(path, data, indent):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+    os.replace(tmp, path)
+
+
+def _write_text_file(path, text):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 def _degrade(error):

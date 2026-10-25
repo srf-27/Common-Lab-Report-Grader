@@ -106,8 +106,13 @@ def test_pg_roundtrip_if_available():
             text = os.path.join(sessions, "s_pg_test", "reports", "a", "text.md")
             storage.write_text(text, "正文内容")
             assert storage.read_text(text) == "正文内容"
+            # PG 模式下文件作热镜像：直读磁盘的调用方（如 upload.save 的原件）仍一致
+            with open(path, encoding="utf-8") as f:
+                import json as _json
+                assert _json.load(f) == data
             storage.remove(path)
             assert not storage.exists(path)
+            assert not os.path.exists(path)
 
         _with_tmp_sessions(body)
     finally:
