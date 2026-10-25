@@ -9,7 +9,7 @@ from experiment_report_grader.nodes.rubric_generator import RubricGenerator
 
 
 class _LLM:
-    def chat(self, messages, temperature=0):
+    def chat(self, messages, temperature=0, **kwargs):
         return json.dumps({"criteria": [
             {"name": "数据处理", "weight": 70, "doc_ref": "大纲九；步骤 3",
              "levels": {k: k for k in "ABCDE"}, "mechanical": False, "non_report": False},

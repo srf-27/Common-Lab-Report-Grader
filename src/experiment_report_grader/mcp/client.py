@@ -265,3 +265,29 @@ def collect(servers, mount, query, budget=None):
 def _match(uri, patterns):
     from fnmatch import fnmatch
     return any(fnmatch(uri, p) for p in patterns)
+
+
+MCP_TOOLS_LIMIT = 8
+
+
+def tools_schema(cfg, limit=MCP_TOOLS_LIMIT):
+    """把 MCP 服务器的 tools 转成 OpenAI tools（inputSchema 直作 parameters）。"""
+    client = MCPClient(cfg)
+    try:
+        tools = client.list_tools()[:limit]
+    finally:
+        client.close()
+    return [{"type": "function", "function": {
+        "name": tool["name"],
+        "description": tool.get("description") or "",
+        "parameters": tool.get("inputSchema") or {"type": "object"},
+    }} for tool in tools]
+
+
+def call(cfg, name, arguments, timeout=None):
+    """对服务器执行单个工具并返回解析后的文本/结构。每次调用独立连接。"""
+    client = MCPClient(cfg)
+    try:
+        return _text_of(client.call_tool(name, arguments or {}))
+    finally:
+        client.close()

@@ -345,7 +345,7 @@ export default function Results() {
                         <div className="kv-val">{totalScore(result) ?? "—"}</div>
                       </div>
                       <div>
-                        <div className="kv-key">机械 / 语义</div>
+                        <div className="kv-key">报告数</div>
                         <div className="kv-val">
                           {result.grading.subtotals?.procedural ?? "—"} /{" "}
                           {result.grading.subtotals?.semantic ?? "—"}

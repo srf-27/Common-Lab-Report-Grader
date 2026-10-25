@@ -23,6 +23,8 @@ from .nodes.grader import Grader, _coerce_rubric
 from .nodes.report_extractor import ReportExtractor
 from .nodes.rubric_generator import RubricGenerator
 from .utils.file_parser import collect_report_files
+from .utils import calc_tools
+from .utils import skills as skills_loader
 from . import storage
 from .web.state import (
     OUTPUT_FOLDER, PROJECT_ROOT, RUNNING_STATUS, SESSIONS_DIR, STUDENT_FIELDS, VALID_LEVELS,
@@ -318,10 +320,12 @@ class _ThinkingTap:
         self._task = task
         self._saw_thinking = False
 
-    def chat(self, messages, temperature=0.3, retries=2):
+    def chat(self, messages, temperature=0.3, retries=2, **kwargs):
         answer = []
         try:
-            for kind, payload in self._client.chat_stream(messages, temperature=temperature):
+            for kind, payload in self._client.chat_stream(
+                    messages, temperature=temperature,
+                    max_tokens=kwargs.get("max_tokens")):
                 if kind == "thinking" and payload:
                     self._saw_thinking = True
                     task_update(self._task, thinking=payload)
@@ -331,7 +335,7 @@ class _ThinkingTap:
                         task_update(self._task, thinking=payload)
             return "".join(answer)
         except Exception:
-            return self._client.chat(messages, temperature=temperature, retries=retries)
+            return self._client.chat(messages, temperature=temperature, retries=retries, **kwargs)
 
 
 @app.route("/process_criteria", methods=["POST"])
@@ -1733,7 +1737,8 @@ def start_grading():
         state["grader"] = Grader(state["rubric_json"] or state["rubric"],
                                  llm_client=llm(state["config"]), config=state["config"],
                                  output_dir=session_sub("grading"),
-                                 similarity_scope=state.get("session"), kb_session_dir=session_dir())
+                                 similarity_scope=state.get("session"), kb_session_dir=session_dir(),
+                                 toolbelt=_node_toolbelt("grade"))
         # 保留旧结果，评完由 _finish 覆盖；中途取消不至于丢掉上一轮成绩
         state["grader"].results = prev_results
         _spawn_grading(
@@ -2346,6 +2351,133 @@ def api_roster():
         "mostlyUnmatched": bool(roster and suspicious and len(suspicious) * 2 >= max(1, len(
             [r for r in state["extracted_reports"] if r.get("status") == "ok"]))),
     })
+
+
+FLOW_NODES = [
+    {"id": "extract", "label": "上传与提取", "kind": "mech"},
+    {"id": "rubric", "label": "细则生成", "kind": "llm"},
+    {"id": "pilot", "label": "样本校准", "kind": "llm"},
+    {"id": "injection", "label": "注入检测", "kind": "llm"},
+    {"id": "safety", "label": "内容安全", "kind": "llm"},
+    {"id": "assign", "label": "维度归类", "kind": "llm"},
+    {"id": "grade", "label": "判级", "kind": "llm", "pluggable": True},
+    {"id": "review", "label": "终审", "kind": "human"},
+    {"id": "export", "label": "导出成绩", "kind": "mech"},
+]
+
+PLUGGABLE_TOOLS = {"grade": ["calc"]}
+
+
+def _flow_status():
+    results = state["grader"].results if state.get("grader") else []
+    graded = [r for r in results if r.get("status") == "graded"]
+    approved = _approved_ids()
+    task = state.get("task") or {}
+    running = lambda kind: task.get("kind") == kind and task.get("status") == "running"
+    grading_running = (state.get("grading_status") or {}).get("phase") == "running"
+    llm_done = "done" if graded else ("active" if grading_running else "pending")
+    return {
+        "extract": "active" if running("reports") else
+                   ("done" if state.get("extracted_reports") else "pending"),
+        "rubric": "active" if running("criteria") else
+                  ("done" if state.get("rubric_json") else "pending"),
+        "pilot": "active" if running("pilot") else
+                 ("done" if _rubric_confirmed() else "pending"),
+        "injection": llm_done, "safety": llm_done, "assign": llm_done, "grade": llm_done,
+        "review": ("done" if graded and len(approved) >= len(graded) else
+                   "active" if graded else "pending"),
+        "export": "done" if os.path.exists(
+            os.path.join(session_dir(), "grading", "grading_summary.xlsx")) else "pending",
+    }
+
+
+def _node_toolbelt(node_id):
+    """把流程配置的工具清单（calc / skill:<名字> / mcp:<服务器>）聚合为 (schemas, executor)。"""
+    entries = ((state.get("flow") or {}).get(node_id) or {}).get("tools")
+    if entries is None:
+        entries = ["calc"] if (state.get("config") or {}).get("grading", {}).get(
+            "calc_verify", True) else []
+    schemas, handlers = [], {}
+
+    def add(schema, fn):
+        if schema["function"]["name"] not in handlers:
+            schemas.append(schema)
+            handlers[schema["function"]["name"]] = fn
+
+    for entry in entries:
+        if entry == "calc":
+            for schema in calc_tools.TOOLS_SCHEMA:
+                add(schema, calc_tools.dispatch)
+        elif str(entry).startswith("skill:"):
+            module = skills_loader.load(str(entry)[6:])
+            if module is not None:
+                for schema in module.TOOLS_SCHEMA:
+                    add(schema, module.dispatch)
+        elif str(entry).startswith("mcp:"):
+            server = mcp_store.load_servers().get(str(entry)[4:])
+            if not server:
+                continue
+            try:
+                for schema in mcp_client.tools_schema(server):
+                    add(schema, lambda name, args, cfg=server: mcp_client.call(cfg, name, args))
+            except Exception:
+                continue
+
+    def executor(name, arguments):
+        fn = handlers.get(name)
+        if fn is None:
+            raise ValueError(f"未知工具: {name}")
+        return fn(name, arguments)
+
+    return schemas, executor
+
+
+def _flow_capabilities():
+    capabilities = [{"id": "calc", "label": "计算工具包",
+                     "desc": "calc_eval / calc_stats / calc_fit 验算公式、不确定度与拟合",
+                     "tools": [t["function"]["name"] for t in calc_tools.TOOLS_SCHEMA]}]
+    for skill in skills_loader.list_skills():
+        capabilities.append({"id": f"skill:{skill['name']}", "label": f"技能 · {skill['name']}",
+                             "desc": skill["desc"], "tools": skill["tools"]})
+    for name in (state.get("mcp") or {}).get("servers") or []:
+        server = mcp_store.load_servers().get(name)
+        tool_names = []
+        if server:
+            try:
+                tool_names = [t["function"]["name"] for t in mcp_client.tools_schema(server)]
+            except Exception:
+                pass
+        capabilities.append({"id": f"mcp:{name}", "label": f"MCP · {name}",
+                             "desc": "、".join(tool_names[:4]) or "（不可用）", "tools": tool_names})
+    return capabilities
+
+
+@app.route("/api/flow")
+def api_flow():
+    status = _flow_status()
+    return jsonify({
+        "nodes": [{**n, "status": status.get(n["id"], "pending")} for n in FLOW_NODES],
+        "tools": PLUGGABLE_TOOLS,
+        "capabilities": _flow_capabilities(),
+        "config": state.get("flow") or {},
+        "mcp": state.get("mcp") or {},
+    })
+
+
+@app.route("/flow/config", methods=["POST"])
+def flow_config():
+    data = request.get_json(silent=True) or {}
+    node = str(data.get("node", ""))
+    if not any(n["id"] == node and n.get("pluggable") for n in FLOW_NODES):
+        return jsonify({"error": f"节点「{node}」不可配置"}), 400
+    allowed = {"calc"} | {f"skill:{s['name']}" for s in skills_loader.list_skills()} | {
+        f"mcp:{name}" for name in (state.get("mcp") or {}).get("servers") or []}
+    cfg = state.setdefault("flow", {}).setdefault(node, {})
+    if isinstance(data.get("tools"), list):
+        cfg["tools"] = [t for t in data["tools"] if t in allowed]
+    cfg.pop("skills", None)
+    storage.write_json(os.path.join(session_dir(), "flow.json"), state["flow"])
+    return jsonify({"ok": True, "config": state["flow"]})
 
 
 @app.route("/api/settings")

@@ -3,6 +3,7 @@ import { ApiError, errorText, getJSON, postEmpty, postForm, postFormJSON, postJS
 import { LEVELS, LEVEL_LABEL } from "../lib/format";
 import { Prose } from "../lib/markdown";
 import { useData, usePoll } from "../lib/hooks";
+import { useApp } from "../lib/store";
 import { toast } from "../lib/toast";
 import {
   AutoTextarea,
@@ -26,7 +27,6 @@ import {
 const emptyCriterion = () => ({
   name: "",
   weight: 0,
-  mechanical: false,
   doc_ref: "",
   levels: { A: "", B: "", C: "", D: "", E: "" },
   rules: null,
@@ -47,6 +47,7 @@ const missingFields = (item) => {
 
 export default function Rubric() {
   const { data, error, loading, load } = useData("/api/rubric");
+  const { reload: reloadBoot } = useApp();
   const { data: pilotData, load: loadPilot } = useData("/api/pilot");
   const [draft, setDraft] = useState([]);
   const [file, setFile] = useState(null);
@@ -211,6 +212,7 @@ export default function Rubric() {
       setTask(next);
       if (next.status !== "running") {
         setPolling(false);
+        reloadBoot();
         if (next.status === "done") {
           toast(next.detail || "评分细则已生成", "ok");
           load();
@@ -315,7 +317,6 @@ export default function Rubric() {
         criteria: draft.map((item) => ({
           name: String(item.name).trim(),
           weight: Number(item.weight) || 0,
-          mechanical: Boolean(item.mechanical),
           excluded: Boolean(item.excluded),
           non_report: Boolean(item.non_report),
           doc_ref: item.doc_ref || "",
@@ -328,6 +329,7 @@ export default function Rubric() {
       setWarnings(null);
       await load();
       loadPilot();
+      reloadBoot();
       toast("评分细则已保存", "ok");
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.data?.warnings) {
@@ -651,6 +653,18 @@ export default function Rubric() {
               />
               <span className="check-label">删去不相干维度（保留分值）</span>
             </label>
+            <Button
+              size="sm"
+              variant="plain"
+              icon="trash"
+              disabled={!excludableDims.length || busy}
+              onClick={() => {
+                setDraft((list) => list.filter((item) => !(item.can_exclude || item.excluded)));
+                toast("已删去不相干维度，保存后其余权重自动归一到 100%", "ok");
+              }}
+            >
+              删去不相干维度（不保留分值）
+            </Button>
             <Button size="sm" icon="plus" onClick={() => setDraft((list) => [...list, emptyCriterion()])}>
               新增
             </Button>
@@ -672,7 +686,6 @@ export default function Rubric() {
                   <span className="row-sub" style={{ margin: 0 }}>
                     {Number(item.weight) || 0}%
                   </span>
-                  {item.mechanical ? <Badge tone="accent">机械</Badge> : null}
                   {item.non_report && !item.excluded ? (
                     <Badge tone="warn">建议停用</Badge>
                   ) : null}
@@ -755,17 +768,6 @@ export default function Rubric() {
                     />
                   )}
                 </Field>
-                <div className="field" style={{ justifyContent: "flex-end" }}>
-                  <span className="field-label">判决方式</span>
-                  <div className="spread">
-                    <span className="t-body">可程序化判定</span>
-                    <Switch
-                      checked={Boolean(item.mechanical)}
-                      onChange={(checked) => patch(index, { mechanical: checked })}
-                      aria-label="可程序化判定"
-                    />
-                  </div>
-                </div>
               </div>
               <div className="stack" style={{ gap: 10 }}>
                 {LEVELS.map((level) => (

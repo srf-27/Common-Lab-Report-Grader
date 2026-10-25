@@ -11,27 +11,29 @@ const STATUS_TONE = { pending: "", active: "ok", done: "accent" };
 
 export default function Flow() {
   const { data, error, loading, load } = useData("/api/flow");
-  const [skillsText, setSkillsText] = useState("");
+  const [selected, setSelected] = useState(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const cfg = (data?.config?.grade || {});
-    setSkillsText((cfg.skills || []).join("\n"));
+    if (selected == null) {
+      setSelected(data?.config?.grade?.tools || ["calc"]);
+    }
   }, [data?.config]);
 
   usePoll(load, 3000, true);
 
   const nodes = data?.nodes || [];
-  const gradeCfg = data?.config?.grade || {};
-  const calcOn = (gradeCfg.tools || []).includes("calc");
+  const capabilities = data?.capabilities || [];
 
-  const saveGradeNode = async (tools) => {
+  const toggle = (id) =>
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const saveGradeNode = async () => {
     setBusy(true);
     try {
-      const skills = skillsText.split("\n").map((s) => s.trim()).filter(Boolean);
-      await postJSON("/flow/config", { node: "grade", tools, skills });
+      await postJSON("/flow/config", { node: "grade", tools: selected });
       await load();
-      toast("判级节点配置已保存，下一轮评分生效", "ok");
+      toast("判级节点能力已保存，下一轮评分生效", "ok");
     } catch (err) {
       toast(errorText(err), "danger");
     } finally {
@@ -85,40 +87,32 @@ export default function Flow() {
       </Group>
 
       <Group
-        title="判级节点 · 可插拔配置"
-        note="只改变判级这一步：可挂计算工具与教师补充要求；基础评分提示词不变"
-        footer="保存后下一轮评分生效；正在跑的评分仍用旧配置。"
+        title="判级节点 · 可挂载能力"
+        note="真正可调用的工具：内置计算包 / skills 目录技能包 / 已挂载 MCP 服务器的工具"
+        footer="勾选后判级模型可在 function calling 中真实调用这些工具；保存后下一轮评分生效。"
       >
-        <div className="list-row" style={{ display: "block" }}>
-          <div className="field" style={{ justifyContent: "space-between" }}>
-            <span className="field-label">计算工具包（calc）</span>
-            <Switch
-              checked={calcOn}
-              onChange={(checked) => saveGradeNode(checked ? ["calc"] : [])}
-              aria-label="计算工具包"
-            />
-          </div>
-          <p className="t-footnote c-secondary" style={{ margin: "4px 0 12px" }}>
-            开启后，模型判级前可用 calc_eval / calc_stats / calc_fit 复算报告中的公式、不确定度与拟合，验算不符会写进判级理由。
-          </p>
-          <Field label="教师补充要求（skills，每行一条，最多 5 条）">
-            {(id) => (
-              <textarea
-                id={id}
-                className="input"
-                rows={4}
-                maxLength={1500}
-                value={skillsText}
-                placeholder={"例如：物理实验必须检查有效数字与单位\n不确定度未给置信因子按 k=2 处理"}
-                onChange={(event) => setSkillsText(event.target.value)}
+        {capabilities.map((cap) => (
+          <div className="list-row" key={cap.id} style={{ gap: 10 }}>
+            <span className="row-main">
+              <span className="row-title" style={{ display: "block" }}>{cap.label}</span>
+              <span className="row-sub" style={{ display: "block", whiteSpace: "normal" }}>
+                {cap.desc}
+              </span>
+            </span>
+            <span className="row-wrap" style={{ gap: 6 }}>
+              {cap.tools.length ? <Badge>{cap.tools.length} 个工具</Badge> : <Badge tone="warn">无工具</Badge>}
+              <Switch
+                checked={selected.includes(cap.id)}
+                onChange={() => toggle(cap.id)}
+                aria-label={`挂载 ${cap.label}`}
               />
-            )}
-          </Field>
-          <div className="row" style={{ justifyContent: "flex-end", marginTop: 10 }}>
-            <Button variant="filled" icon="check" loading={busy} onClick={() => saveGradeNode(calcOn ? ["calc"] : [])}>
-              保存
-            </Button>
+            </span>
           </div>
+        ))}
+        <div className="row" style={{ justifyContent: "flex-end", marginTop: 10 }}>
+          <Button variant="filled" icon="check" loading={busy} onClick={saveGradeNode}>
+            保存判级节点能力
+          </Button>
         </div>
       </Group>
 

@@ -98,6 +98,13 @@ export default function ReportDetail({ filename }) {
       {data ? (
         <div className="split">
           <Group title="维度切分" note={`${blocks.length} 个维度块`}>
+            {!graded ? (
+              <div style={{ marginBottom: 12 }}>
+                <Banner icon="info">
+                  尚未评分——评分时模型会把正文段落归入各维度，届时此处显示挂载结果；修改过细则会清空已有结果，需重新评分。
+                </Banner>
+              </div>
+            ) : null}
             {blocks.length ? (
               blocks.map((block, index) => (
                 <div key={`${block.criterion}-${index}`} className="list-row" style={{ display: "block" }}>
@@ -109,7 +116,6 @@ export default function ReportDetail({ filename }) {
                           {block.weight}%
                         </span>
                       ) : null}
-                      {block.mechanical ? <Badge tone="accent">机械</Badge> : null}
                     </span>
                     <span className="row" style={{ gap: 8 }}>
                       <span className="t-caption c-secondary">
@@ -200,14 +206,6 @@ export default function ReportDetail({ filename }) {
                     <small>/ 100</small>
                   </div>
                   <div className="kv" style={{ marginTop: 12 }}>
-                    <div>
-                      <div className="kv-key">机械判决</div>
-                      <div className="kv-val">{result.grading.subtotals?.procedural ?? "—"}</div>
-                    </div>
-                    <div>
-                      <div className="kv-key">语义评分</div>
-                      <div className="kv-val">{result.grading.subtotals?.semantic ?? "—"}</div>
-                    </div>
                     <div>
                       <div className="kv-key">评分时间</div>
                       <div className="kv-val">{timeText(result.graded_at)}</div>

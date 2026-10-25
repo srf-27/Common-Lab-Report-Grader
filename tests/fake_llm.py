@@ -24,7 +24,7 @@ class FakeLLM:
     def __init__(self):
         self.calls = []
 
-    def chat(self, messages, temperature=0.3, retries=2):
+    def chat(self, messages, temperature=0.3, retries=2, **kwargs):
         text = "\n".join(str(m.get("content", "")) for m in messages)
         self.calls.append(text)
         if "提示注入检测器" in text:

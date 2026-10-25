@@ -18,7 +18,7 @@ from experiment_report_grader.web.state import hydrate_session, load_sessions, n
 
 
 class FakeLLM:
-    def chat(self, messages, temperature=0.3, retries=2):
+    def chat(self, messages, temperature=0.3, retries=2, **kwargs):
         return "{}"
 
 

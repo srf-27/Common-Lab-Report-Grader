@@ -364,15 +364,9 @@ button:disabled {
 .brand-mark {
   width: 30px;
   height: 30px;
-  border-radius: 8px;
   display: grid;
   place-items: center;
-  color: var(--on-tint);
-  background: linear-gradient(160deg, color-mix(in srgb, var(--tint) 82%, #fff), var(--tint));
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  color: var(--tint);
 }
 
 .brand-title {

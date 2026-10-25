@@ -57,7 +57,7 @@ def test_non_json_grading_marks_failed():
 
 def test_unknown_criterion_falls_back_to_c():
     class Sloppy(FakeLLM):
-        def chat(self, messages, temperature=0.3, retries=2):
+        def chat(self, messages, temperature=0.3, retries=2, **kwargs):
             text = "\n".join(str(m.get("content", "")) for m in messages)
             if "实验报告评阅专家" in text:
                 return json.dumps({"scores": {"数据": {"level": "A", "evidence": "e"}}, "summary": ""})

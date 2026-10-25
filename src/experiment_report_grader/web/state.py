@@ -45,6 +45,7 @@ state = {
     "approved_ids": set(),
     "mcp": {"servers": [], "resources": [], "search_tool": "", "prompt": "", "max_chars": 4000},
     "mcp_status": [],
+    "flow": {},
     "usage": {"cost": 0.0, "tokens_in": 0, "tokens_out": 0, "calls": 0, "model": "", "seq": 0},
 }
 
@@ -229,6 +230,7 @@ def hydrate_session(sid):
 
     state["approved_ids"] = load_approved()
     state["mcp"] = load_mcp_mount(sid)
+    state["flow"] = storage.read_json(os.path.join(session_dir(sid), "flow.json"), {}) or {}
 
 
 def mcp_mount_path(sid=None):

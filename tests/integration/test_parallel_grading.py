@@ -32,7 +32,7 @@ class SlowLLM(FakeLLM):
     peak = 0
     lock = threading.Lock()
 
-    def chat(self, messages, temperature=0.3, retries=2):
+    def chat(self, messages, temperature=0.3, retries=2, **kwargs):
         with type(self).lock:
             type(self).active += 1
             type(self).peak = max(type(self).peak, type(self).active)

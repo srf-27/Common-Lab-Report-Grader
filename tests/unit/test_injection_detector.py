@@ -17,7 +17,7 @@ class Stub:
     def __init__(self, resp=None, exc=None):
         self.resp, self.exc, self.messages = resp, exc, []
 
-    def chat(self, messages, temperature=0):
+    def chat(self, messages, temperature=0, **kwargs):
         self.messages = messages
         if self.exc:
             raise self.exc
