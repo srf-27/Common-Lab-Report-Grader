@@ -12,13 +12,14 @@ const STATUS_TONE = { pending: "", active: "ok", done: "accent" };
 export default function Flow() {
   const { data, error, loading, load } = useData("/api/flow");
   const [selected, setSelected] = useState(null);
+  const [editingNode, setEditingNode] = useState(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (selected == null) {
-      setSelected(data?.config?.grade?.tools || ["calc"]);
+    if (editingNode && selected != null) {
+      setSelected(data?.config?.[editingNode]?.tools || []);
     }
-  }, [data?.config]);
+  }, [editingNode]);
 
   usePoll(load, 3000, true);
 
@@ -28,12 +29,13 @@ export default function Flow() {
   const toggle = (id) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const saveGradeNode = async () => {
+  const saveNode = async () => {
     setBusy(true);
     try {
-      await postJSON("/flow/config", { node: "grade", tools: selected });
+      await postJSON("/flow/config", { node: editingNode, tools: selected });
       await load();
-      toast("判级节点能力已保存，下一轮评分生效", "ok");
+      toast("节点能力已保存，下一轮调用生效", "ok");
+      setEditingNode(null);
     } catch (err) {
       toast(errorText(err), "danger");
     } finally {
@@ -81,40 +83,57 @@ export default function Flow() {
             </span>
             <span className="row-wrap" style={{ gap: 6 }}>
               <Badge tone={STATUS_TONE[node.status]}>{STATUS_LABEL[node.status]}</Badge>
+              {node.pluggable ? (
+                <Button
+                  size="sm"
+                  variant={editingNode === node.id ? "filled" : "plain"}
+                  onClick={() => {
+                    setEditingNode(node.id);
+                    setSelected(data?.config?.[node.id]?.tools || []);
+                  }}
+                >
+                  挂载能力
+                </Button>
+              ) : null}
             </span>
           </div>
         ))}
       </Group>
 
-      <Group
-        title="判级节点 · 可挂载能力"
-        note="真正可调用的工具：内置计算包 / skills 目录技能包 / 已挂载 MCP 服务器的工具"
-        footer="勾选后判级模型可在 function calling 中真实调用这些工具；保存后下一轮评分生效。"
-      >
-        {capabilities.map((cap) => (
-          <div className="list-row" key={cap.id} style={{ gap: 10 }}>
-            <span className="row-main">
-              <span className="row-title" style={{ display: "block" }}>{cap.label}</span>
-              <span className="row-sub" style={{ display: "block", whiteSpace: "normal" }}>
-                {cap.desc}
+      {editingNode ? (
+        <Group
+          title={`「${(data?.nodes || []).find((n) => n.id === editingNode)?.label || editingNode}」节点 · 可挂载能力`}
+          note="真正可调用的工具：内置计算包 / skills 目录技能包 / 已挂载 MCP 服务器的工具"
+          footer="勾选后该节点的模型可在 function calling 中真实调用；保存后下一轮调用生效。"
+          actions={
+            <IconButton icon="x" label="收起" onClick={() => setEditingNode(null)} />
+          }
+        >
+          {capabilities.map((cap) => (
+            <div className="list-row" key={cap.id} style={{ gap: 10 }}>
+              <span className="row-main">
+                <span className="row-title" style={{ display: "block" }}>{cap.label}</span>
+                <span className="row-sub" style={{ display: "block", whiteSpace: "normal" }}>
+                  {cap.desc}
+                </span>
               </span>
-            </span>
-            <span className="row-wrap" style={{ gap: 6 }}>
-              {cap.tools.length ? <Badge>{cap.tools.length} 个工具</Badge> : <Badge tone="warn">无工具</Badge>}
-              <Switch
-                checked={selected.includes(cap.id)}
-                onChange={() => toggle(cap.id)}
-                aria-label={`挂载 ${cap.label}`}
-              />
-            </span>
+              <span className="row-wrap" style={{ gap: 6 }}>
+                {cap.tools.length ? <Badge>{cap.tools.length} 个工具</Badge> : <Badge tone="warn">无工具</Badge>}
+                <Switch
+                  checked={selected.includes(cap.id)}
+                  onChange={() => toggle(cap.id)}
+                  aria-label={`挂载 ${cap.label}`}
+                />
+              </span>
+            </div>
+          ))}
+          <div className="row" style={{ justifyContent: "flex-end", marginTop: 10 }}>
+            <Button variant="filled" icon="check" loading={busy} onClick={saveNode}>
+              保存节点能力
+            </Button>
           </div>
-        ))}
-        <div className="row" style={{ justifyContent: "flex-end", marginTop: 10 }}>
-          <Button variant="filled" icon="check" loading={busy} onClick={saveGradeNode}>
-            保存判级节点能力
-          </Button>
-        </div>
-      </Group>
+        </Group>
+      ) : null}
 
       <McpPanel />
     </>

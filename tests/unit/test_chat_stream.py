@@ -15,7 +15,8 @@ class FakeStreamClient:
     def __init__(self, events):
         self.events = events
 
-    def chat_stream(self, messages, temperature=0.3, max_tokens=None):
+    def chat_stream(self, messages, temperature=0.3, max_tokens=None,
+                    tools=None, tool_executor=None):
         yield from self.events
 
     def chat(self, messages, temperature=0.3, retries=2, **kwargs):

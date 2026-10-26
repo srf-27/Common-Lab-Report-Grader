@@ -15,6 +15,20 @@ from ..utils.injection_detector import detect_injection
 from ..utils.privacy import anonymize_text
 from .rubric_io import LEVEL_POINTS, LEVELS, compute_subtotals, match_criterion
 
+class BeltLlm:
+    """给某个流程节点的 LLM 调用挂上该节点配置的工具（calc / skill / MCP）。"""
+
+    def __init__(self, client, schemas, executor):
+        self._client = client
+        self._schemas = schemas
+        self._executor = executor
+
+    def chat(self, messages, temperature=0.3, retries=2, **kwargs):
+        return self._client.chat(messages, temperature=temperature, retries=retries,
+                                 tools=self._schemas, tool_executor=self._executor,
+                                 **kwargs)
+
+
 GRADING_SYSTEM = """你是实验报告评阅专家。只按下面给出的评分维度与等级描述判级，不得新增维度。
 
 ## 判定规则
@@ -88,7 +102,8 @@ def _coerce_rubric(rubric):
 
 class Grader:
     def __init__(self, rubric, llm_client=None, config=None, output_dir=None,
-                 similarity_scope=None, kb_session_dir=None, toolbelt=None):
+                 similarity_scope=None, kb_session_dir=None, toolbelt=None,
+                 node_toolbelts=None):
         self.rubric = _coerce_rubric(rubric)
         self.llm = llm_client or make_llm(config)
         self.config = config or {}
@@ -120,11 +135,16 @@ class Grader:
         self.embedding_function = create_embedding_function(vector_cfg.get("embedding"))
         grading_cfg = self.config.get("grading") or {}
         self.calc_verify = bool(grading_cfg.get("calc_verify", True))
+        self._node_toolbelts = node_toolbelts or {}
         if toolbelt is not None:
             self.tool_schemas, self.tool_executor = toolbelt
         else:
-            self.tool_schemas = calc_tools.TOOLS_SCHEMA if self.calc_verify else None
-            self.tool_executor = calc_tools.dispatch
+            belt = self._node_toolbelts.get("grade")
+            if belt:
+                self.tool_schemas, self.tool_executor = belt
+            else:
+                self.tool_schemas = calc_tools.TOOLS_SCHEMA if self.calc_verify else None
+                self.tool_executor = calc_tools.dispatch
         self.similarity_threshold = grading_cfg.get("similarity_threshold", 0.92)
         self.similarity_reject = grading_cfg.get("similarity_reject", 0.97)
         self.dimension_collections = {}
@@ -155,6 +175,13 @@ class Grader:
         except Exception:
             pass
 
+    def _llm_for(self, node_id):
+        """该节点的 LLM：配置了工具带则包一层，否则用共享客户端。"""
+        belt = self._node_toolbelts.get(node_id)
+        if belt and belt[0]:
+            return BeltLlm(self.llm, *belt)
+        return self.llm
+
     def _cached_check(self, kind, text):
         """同一份正文重评时跳过重复检测：正文不变，检测结论就不会变。"""
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -163,9 +190,9 @@ class Grader:
         if key in cache:
             return {k: v for k, v in cache[key].items() if k != "at"}
         if kind == "injection":
-            value = detect_injection(text, self.llm)
+            value = detect_injection(text, self._llm_for("injection"))
         else:
-            value = check_content_safety(text, self.llm)
+            value = check_content_safety(text, self._llm_for("safety"))
         # 检测失败或只审了前半段都不缓存，下次重试
         if not value.get("detection_failed") and not value.get("truncated"):
             with self._cache_lock:
@@ -446,7 +473,8 @@ class Grader:
             + "\n待归类内容（JSON）：" + json.dumps(items, ensure_ascii=False)
         )
         try:
-            data = _parse_json(self.llm.chat([{"role": "user", "content": prompt}], temperature=0.1))
+            data = _parse_json(self._llm_for("assign").chat(
+                [{"role": "user", "content": prompt}], temperature=0.1))
         except Exception:
             return {}
         result = {}
