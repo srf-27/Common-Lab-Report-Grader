@@ -108,7 +108,8 @@ class LLMClient:
             resp = create(messages, False)
             return resp.choices[0].message.content
 
-    def chat_stream(self, messages, temperature=0.3, max_tokens=None):
+    def chat_stream(self, messages, temperature=0.3, max_tokens=None,
+                         tools=None, tool_executor=None):
         """流式对话：逐段 yield ("thinking"|"answer", 增量文本)，末尾 yield ("usage", usage对象)。
 
         仅 openai 后端真流式（思考型模型的 reasoning_content 走 thinking 事件）；
@@ -116,6 +117,13 @@ class LLMClient:
         """
         if self.backend != "openai":
             yield "answer", self.chat(messages, temperature=temperature)
+            yield "usage", {}
+            return
+        if tools and tool_executor:
+            # 工具循环走非流式（流式与 function calling 并用会复杂化计费）
+            text = self._chat_openai(messages, temperature, tools=tools,
+                                     tool_executor=tool_executor, max_tokens=max_tokens)
+            yield "answer", text
             yield "usage", {}
             return
         cfg = self.config["openai"]

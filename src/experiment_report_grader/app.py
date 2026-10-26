@@ -19,7 +19,7 @@ from .factory import llm
 from .mcp import client as mcp_client
 from .mcp import store as mcp_store
 from .nodes import agreement, external_scores, rubric_io
-from .nodes.grader import Grader, _coerce_rubric
+from .nodes.grader import BeltLlm, Grader, _coerce_rubric
 from .nodes.report_extractor import ReportExtractor
 from .nodes.rubric_generator import RubricGenerator
 from .utils.file_parser import collect_report_files
@@ -325,7 +325,9 @@ class _ThinkingTap:
         try:
             for kind, payload in self._client.chat_stream(
                     messages, temperature=temperature,
-                    max_tokens=kwargs.get("max_tokens")):
+                    max_tokens=kwargs.get("max_tokens"),
+                    tools=kwargs.get("tools"),
+                    tool_executor=kwargs.get("tool_executor")):
                 if kind == "thinking" and payload:
                     self._saw_thinking = True
                     task_update(self._task, thinking=payload)
@@ -362,8 +364,12 @@ def process_criteria():
     os.makedirs(rubrics_dir, exist_ok=True)
     t = task_start("criteria", "/app/rubric", mode="stage")
     task_update(t, detail=f"已上传 {os.path.basename(filepath)}")
-    generator = RubricGenerator(llm_client=_ThinkingTap(llm(state["config"]), t),
-                                output_dir=rubrics_dir)
+    schemas, executor = _node_toolbelt("rubric")
+    generator = RubricGenerator(
+        llm_client=_ThinkingTap(llm(state["config"]), t),
+        output_dir=rubrics_dir) if not schemas else RubricGenerator(
+        llm_client=BeltLlm(_ThinkingTap(llm(state["config"]), t), schemas, executor),
+        output_dir=rubrics_dir)
 
     def work():
         try:
@@ -1738,7 +1744,9 @@ def start_grading():
                                  llm_client=llm(state["config"]), config=state["config"],
                                  output_dir=session_sub("grading"),
                                  similarity_scope=state.get("session"), kb_session_dir=session_dir(),
-                                 toolbelt=_node_toolbelt("grade"))
+                                 node_toolbelts={node: _node_toolbelt(node)
+                                                 for node in ("grade", "injection",
+                                                              "safety", "assign")})
         # 保留旧结果，评完由 _finish 覆盖；中途取消不至于丢掉上一轮成绩
         state["grader"].results = prev_results
         _spawn_grading(
@@ -2355,18 +2363,15 @@ def api_roster():
 
 FLOW_NODES = [
     {"id": "extract", "label": "上传与提取", "kind": "mech"},
-    {"id": "rubric", "label": "细则生成", "kind": "llm"},
-    {"id": "pilot", "label": "样本校准", "kind": "llm"},
-    {"id": "injection", "label": "注入检测", "kind": "llm"},
-    {"id": "safety", "label": "内容安全", "kind": "llm"},
-    {"id": "assign", "label": "维度归类", "kind": "llm"},
+    {"id": "rubric", "label": "细则生成", "kind": "llm", "pluggable": True},
+    {"id": "pilot", "label": "样本校准", "kind": "llm", "pluggable": True},
+    {"id": "injection", "label": "注入检测", "kind": "llm", "pluggable": True},
+    {"id": "safety", "label": "内容安全", "kind": "llm", "pluggable": True},
+    {"id": "assign", "label": "维度归类", "kind": "llm", "pluggable": True},
     {"id": "grade", "label": "判级", "kind": "llm", "pluggable": True},
     {"id": "review", "label": "终审", "kind": "human"},
     {"id": "export", "label": "导出成绩", "kind": "mech"},
 ]
-
-PLUGGABLE_TOOLS = {"grade": ["calc"]}
-
 
 def _flow_status():
     results = state["grader"].results if state.get("grader") else []
@@ -2457,7 +2462,6 @@ def api_flow():
     status = _flow_status()
     return jsonify({
         "nodes": [{**n, "status": status.get(n["id"], "pending")} for n in FLOW_NODES],
-        "tools": PLUGGABLE_TOOLS,
         "capabilities": _flow_capabilities(),
         "config": state.get("flow") or {},
         "mcp": state.get("mcp") or {},

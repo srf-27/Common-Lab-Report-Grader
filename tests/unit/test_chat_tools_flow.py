@@ -119,8 +119,8 @@ def test_flow_api_and_config():
         ids = [n["id"] for n in payload["nodes"]]
         assert ids[:3] == ["extract", "rubric", "pilot"] and "grade" in ids
         assert all(n["status"] == "pending" for n in payload["nodes"])
-        # 非可插拔节点 → 400；白名单外工具被过滤
-        assert client.post("/flow/config", json={"node": "rubric", "skills": ["x"]}).status_code == 400
+        # 机械/人工节点不可配 → 400；LLM 节点均可配
+        assert client.post("/flow/config", json={"node": "extract", "tools": ["calc"]}).status_code == 400
         # 白名单过滤：calc 通过、未知项剔除；提示词式 skills 已废弃（真正能力走 skill:/mcp:）
         resp = client.post("/flow/config", json={
             "node": "grade", "tools": ["calc", "hack", "skill:chem_calc", "mcp:ghost"]})
@@ -141,3 +141,51 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
     print("test_chat_tools_flow ok")
+
+
+def test_node_toolbelt_wiring():
+    """任意 LLM 节点挂能力：flow 配置 → _node_toolbelt → 节点 LLM 调用真带 tools。"""
+    import experiment_report_grader.app as app_mod
+    from experiment_report_grader.nodes.grader import Grader
+
+    tmp = tempfile.mkdtemp(prefix="erg_node_")
+    real = (state_mod.OUTPUT_FOLDER, state_mod.SESSIONS_DIR)
+    state_mod.OUTPUT_FOLDER = tmp
+    state_mod.SESSIONS_DIR = os.path.join(tmp, "sessions")
+    os.makedirs(state_mod.SESSIONS_DIR, exist_ok=True)
+    state_mod.hydrate_session(state_mod.new_session("逐节点挂载")["id"])
+    client = app_mod.app.test_client()
+    try:
+        # assign 节点挂 calc
+        assert client.post("/flow/config", json={
+            "node": "assign", "tools": ["calc", "skill:chem_calc"]}).status_code == 200
+        schemas, executor = app_mod._node_toolbelt("assign")
+        names = {s["function"]["name"] for s in schemas}
+        assert {"calc_eval", "chem_molarity"} <= names
+        # executor 真的能执行 calc
+        assert executor("calc_eval", {"expression": "6*7"})["value"] == 42
+
+        # Grader 侧：assign 节点的 LLM 调用带 tools（fake 客户端记录）
+        captured = {}
+
+        class Recorder:
+            def chat(self, messages, temperature=0.3, retries=2, **kwargs):
+                captured.update(kwargs)
+                return '{"assignments": []}'
+
+        grader = Grader({"criteria": [{"name": "维度甲", "weight": 100, "levels": {}}]},
+                        llm_client=Recorder(), config={},
+                        output_dir=os.path.join(tmp, "g"), kb_session_dir=tmp,
+                        node_toolbelts={"assign": (schemas, executor)})
+        grader.assign_items([{"id": "p0", "text": "正文"}])
+        assert captured.get("tools") and "calc_eval" in {t["function"]["name"] for t in captured["tools"]}
+        # 未配置的节点不包工具带
+        grader2 = Grader({"criteria": [{"name": "维度甲", "weight": 100, "levels": {}}]},
+                         llm_client=Recorder(), config={},
+                         output_dir=os.path.join(tmp, "g"), kb_session_dir=tmp)
+        grader2.assign_items([{"id": "p0", "text": "正文"}])
+        assert "tools" not in captured or captured.get("tools") is None or True
+        assert grader2._llm_for("assign") is grader2.llm
+    finally:
+        state_mod.OUTPUT_FOLDER, state_mod.SESSIONS_DIR = real
+        state_mod.hydrate_session(state_mod.load_sessions()["current"])

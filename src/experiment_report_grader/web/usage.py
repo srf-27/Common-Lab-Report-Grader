@@ -300,8 +300,15 @@ class MeteredLLM(LLMClient):
                        int((time.perf_counter() - started) * 1000))
         return text
 
-    def chat_stream(self, messages, temperature=0.3):
+    def chat_stream(self, messages, temperature=0.3, max_tokens=None,
+                    tools=None, tool_executor=None):
         """流式版计费：事件原样透传，聚合 answer 与 usage 记账（缺失 usage 时按字符估算）。"""
+        if tools and tool_executor:
+            text = self.chat(messages, temperature=temperature, max_tokens=max_tokens,
+                             tools=tools, tool_executor=tool_executor)
+            yield "answer", text
+            yield "usage", {}
+            return
         started = time.perf_counter()
         model = (self.config.get("openai") or {}).get("model", "-")
         answer, usage = [], None
