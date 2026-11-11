@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { errorText, postForm } from "../lib/api";
-import { statusMeta, studentText, timeText, totalScore } from "../lib/format";
+import { errorText, postForm, postJSON } from "../lib/api";
+import { draftTotal, statusMeta, studentText, timeText } from "../lib/format";
 import { useData } from "../lib/hooks";
 import { navigate } from "../lib/router";
 import { toast } from "../lib/toast";
@@ -26,6 +26,7 @@ import {
 const ATTENTION = [
   "flagged_injection",
   "blocked_safety",
+  "flagged_duplicate",
   "llm_failed",
   "detection_failed",
   "audit_truncated",
@@ -56,6 +57,8 @@ export default function Results() {
   const [busyId, setBusyId] = useState("");
   const [regrading, setRegrading] = useState(null);
   const [corrections, setCorrections] = useState("");
+  const [clearing, setClearing] = useState(null);
+  const [clearReason, setClearReason] = useState("");
 
   useEffect(() => {
     if (!data) return;
@@ -68,7 +71,6 @@ export default function Results() {
 
   const counts = data?.counts || {};
   const approved = useMemo(() => new Set(data?.approvedIds || []), [data]);
-  const stale = useMemo(() => new Set(data?.staleIds || []), [data]);
 
   const visible = useMemo(() => {
     const results = data?.results || [];
@@ -81,7 +83,8 @@ export default function Results() {
     });
   }, [data, filter, approved]);
 
-  const attention = (counts.injection || 0) + (counts.blocked || 0) + (counts.failed || 0);
+  const attention = (counts.injection || 0) + (counts.blocked || 0)
+    + (counts.failed || 0) + (counts.duplicate || 0);
 
   const dirty = (result) => {
     const draft = drafts[result.report_id];
@@ -121,7 +124,7 @@ export default function Results() {
         next: "/app/results",
       });
       await load();
-      toast("已终审并写入案例库", "ok");
+      toast("已终审，判级已写入案例库", "ok");
     } catch (err) {
       toast(errorText(err), "danger");
     } finally {
@@ -145,11 +148,29 @@ export default function Results() {
     }
   };
 
+  const clearFlag = async () => {
+    if (!clearing) return;
+    setBusyId(clearing.report_id);
+    try {
+      const res = await postJSON(
+        `/report/${encodeURIComponent(clearing.report_id)}/clear_flag`,
+        { reason: clearReason });
+      toast(res.message || "已放行，请重新评分", "ok");
+      setClearing(null);
+      setClearReason("");
+      await load();
+    } catch (err) {
+      toast(errorText(err), "danger");
+    } finally {
+      setBusyId("");
+    }
+  };
+
   return (
     <>
       <PageHead
         title="评分结果"
-        sub={`${counts.all || 0} 份结果 · ${counts.unapproved || 0} 份待终审 · 终审后的报告进入本课程案例库`}
+        sub={`${counts.all || 0} 份结果 · ${counts.unapproved || 0} 份待终审 · 正文在评分时进入查重库，终审后判级成为本课程范例`}
         actions={
           data?.downloads?.excel ? (
             <a className="btn btn-filled" href={`/download/${data.downloads.excel}`}>
@@ -246,9 +267,10 @@ export default function Results() {
             const meta = statusMeta(result.status);
             const draft = drafts[result.report_id] || { levels: {}, reasons: {} };
             const isApproved = approved.has(result.report_id);
-            const isStale = stale.has(result.report_id);
             const graded = result.status === "graded";
             const cardBusy = busyId === result.report_id;
+            const total = graded ? draftTotal(result, draft, data?.weights) : null;
+            const flags = result.grading?.flags || [];
 
             return (
               <Disclosure
@@ -266,13 +288,19 @@ export default function Results() {
                 meta={
                   <>
                     {isApproved ? <Badge tone="accent">已终审</Badge> : null}
-                    {isStale && graded ? <Badge tone="warn">需重评</Badge> : null}
                     {result.similarity_warnings?.length ? (
                       <Badge tone="warn">重复 {result.similarity_warnings.length}</Badge>
                     ) : null}
+                    {result.safety_detection_failed ? (
+                      <Badge tone="warn">安全检测失败</Badge>
+                    ) : null}
+                    {result.safety_warnings?.length ? (
+                      <Badge tone="warn">内容提示 {result.safety_warnings.length}</Badge>
+                    ) : null}
+                    {flags.length ? <Badge tone="warn">复核 {flags.length}</Badge> : null}
                     {graded ? null : <Badge tone={meta.tone}>{meta.label}</Badge>}
                     <span className="t-title-3 tnum" style={{ minWidth: 40, textAlign: "right" }}>
-                      {totalScore(result) ?? "—"}
+                      {total ?? "—"}
                     </span>
                   </>
                 }
@@ -339,15 +367,34 @@ export default function Results() {
                       ))}
                     </div>
 
+                    {result.grading.summary || flags.length
+                      || result.similarity_warnings?.length || result.safety_warnings?.length ? (
+                      <div className="quote" style={{ marginTop: 14 }}>
+                        {result.grading.summary ? <div>{result.grading.summary}</div> : null}
+                        {flags.map((flag) => (
+                          <div key={`flag-${String(flag)}`}>复核提示：{String(flag)}</div>
+                        ))}
+                        {(result.similarity_warnings || []).map((warning) => (
+                          <div key={`sim-${warning.matched_id}`}>
+                            与 {warning.matched_id} 正文相似度{" "}
+                            {(Number(warning.similarity) * 100).toFixed(1)}%
+                            {warning.level === "rejected" ? "（已达拒绝阈值）" : ""}
+                          </div>
+                        ))}
+                        {(result.safety_warnings || []).map((warning) => (
+                          <div key={`safety-${String(warning)}`}>内容提示：{String(warning)}</div>
+                        ))}
+                      </div>
+                    ) : null}
+
                     <div className="kv" style={{ marginTop: 14 }}>
                       <div>
                         <div className="kv-key">总分</div>
-                        <div className="kv-val">{totalScore(result) ?? "—"}</div>
+                        <div className="kv-val">{total ?? "—"}</div>
                       </div>
                       <div>
-                        <div className="kv-key">报告数</div>
+                        <div className="kv-key">语义小计</div>
                         <div className="kv-val">
-                          {result.grading.subtotals?.procedural ?? "—"} /{" "}
                           {result.grading.subtotals?.semantic ?? "—"}
                         </div>
                       </div>
@@ -371,8 +418,7 @@ export default function Results() {
                         size="sm"
                         variant={isApproved ? "tinted" : "tinted"}
                         icon="lock"
-                        disabled={cardBusy || isApproved || isStale || data.running}
-                        title={isStale ? "细则已修改，请先重评" : undefined}
+                        disabled={cardBusy || isApproved || data.running}
                         onClick={() => approve(result)}
                       >
                         {isApproved ? "已终审" : "终审入库"}
@@ -396,14 +442,6 @@ export default function Results() {
                         维度详情
                       </LinkButton>
                     </div>
-
-                    {isStale ? (
-                      <div style={{ marginTop: 10 }}>
-                        <Banner tone="warn" icon="alert">
-                          评分细则在上次评分后被修改，这份结果需要重评后才能终审。
-                        </Banner>
-                      </div>
-                    ) : null}
                   </>
                 ) : (
                   <>
@@ -412,9 +450,20 @@ export default function Results() {
                         <strong>{meta.label}</strong>
                         {result.error ? `：${result.error}` : ""}
                         {result.injection_details?.evidence ? `：${result.injection_details.evidence}` : ""}
+                        {result.safety_details?.evidence ? `：${result.safety_details.evidence}` : ""}
                       </div>
                       {result.injection_details?.hits?.length ? (
                         <div style={{ marginTop: 4 }}>{result.injection_details.hits.join("；")}</div>
+                      ) : null}
+                      {result.status === "flagged_duplicate" && result.similarity_warnings?.length ? (
+                        <div style={{ marginTop: 4 }}>
+                          {(result.similarity_warnings || []).map((warning) => (
+                            <div key={`dup-${warning.matched_id}`}>
+                              与 {warning.matched_id} 正文相似度{" "}
+                              {(Number(warning.similarity) * 100).toFixed(1)}%（已达拒绝阈值）
+                            </div>
+                          ))}
+                        </div>
                       ) : null}
                     </Banner>
                     <div className="row-wrap" style={{ marginTop: 12 }}>
@@ -429,6 +478,17 @@ export default function Results() {
                         }}
                       >
                         重新评分
+                      </Button>
+                      <Button
+                        size="sm"
+                        icon="check"
+                        disabled={cardBusy || data.running}
+                        onClick={() => {
+                          setClearReason("");
+                          setClearing(result);
+                        }}
+                      >
+                        确认无风险，继续评分
                       </Button>
                       <LinkButton
                         to={`/app/report/${encodeURIComponent(result.report_id)}`}
@@ -527,6 +587,33 @@ export default function Results() {
               value={corrections}
               onChange={(event) => setCorrections(event.target.value)}
               placeholder="可选"
+            />
+          )}
+        </Field>
+      </Sheet>
+
+      <Sheet
+        open={Boolean(clearing)}
+        title="确认无风险，继续评分"
+        text={clearing ? `${clearing.report_id} 的异常标记会被解除，报告回到待评队列，随后请重新评分。` : ""}
+        onClose={() => setClearing(null)}
+        footer={
+          <>
+            <Button onClick={() => setClearing(null)}>取消</Button>
+            <Button variant="filled" loading={busyId === clearing?.report_id} onClick={clearFlag}>
+              确认放行
+            </Button>
+          </>
+        }
+      >
+        <Field label="放行理由" hint="可选，会记入豁免记录以便追溯">
+          {(id) => (
+            <textarea
+              id={id}
+              className="textarea"
+              value={clearReason}
+              onChange={(event) => setClearReason(event.target.value)}
+              placeholder="例如：误判为注入，实为正常实验步骤描述"
             />
           )}
         </Field>

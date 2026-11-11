@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { errorText, getJSON, postJSON } from "../lib/api";
 import { useData, usePoll } from "../lib/hooks";
 import { toast } from "../lib/toast";
-import { Badge, Banner, Button, Field, Group, PageHead, Spinner, Switch } from "../ui";
+import { Badge, Banner, Button, Field, Group, IconButton, PageHead, Spinner, Switch } from "../ui";
 import McpPanel from "./Mcp";
 
 const KIND_LABEL = { mech: "机械", llm: "LLM", human: "人工" };
@@ -16,7 +16,7 @@ export default function Flow() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (editingNode && selected != null) {
+    if (editingNode) {
       setSelected(data?.config?.[editingNode]?.tools || []);
     }
   }, [editingNode]);

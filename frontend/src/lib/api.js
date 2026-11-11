@@ -33,23 +33,29 @@ function toForm(fields) {
   return fd;
 }
 
+/* 破坏性路由要带 CSRF 令牌：服务端在 SPA 外壳里注入一次，这里读出来放进请求头 */
+const csrfHeaders = (extra) => ({
+  "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')?.content || "",
+  ...(extra || {}),
+});
+
 export const postForm = (url, fields) =>
-  fetch(url, { method: "POST", body: toForm(fields) }).then(parse);
+  fetch(url, { method: "POST", headers: csrfHeaders(), body: toForm(fields) }).then(parse);
 
 export const postFormJSON = (url, fields) =>
   fetch(url, {
     method: "POST",
-    headers: { Accept: "application/json" },
+    headers: csrfHeaders({ Accept: "application/json" }),
     body: toForm(fields),
   }).then(parse);
 
 export const postJSON = (url, body) =>
   fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: csrfHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body || {}),
   }).then(parse);
 
-export const postEmpty = (url) => fetch(url, { method: "POST" }).then(parse);
+export const postEmpty = (url) => fetch(url, { method: "POST", headers: csrfHeaders() }).then(parse);
 
 export const errorText = (err) => (err instanceof Error ? err.message : String(err));

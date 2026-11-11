@@ -266,12 +266,15 @@ export default function Settings() {
                   />
                 )}
               </Field>
-              <Field label="单次输出上限 max_tokens">
+              <Field label="单次输出上限 max_tokens" hint="256–16384">
                 {(id) => (
                   <input
                     id={id}
                     className="input tnum"
                     type="number"
+                    min="256"
+                    max="16384"
+                    step="1"
                     value={form.max_tokens}
                     onChange={(event) => set("max_tokens", event.target.value)}
                   />
