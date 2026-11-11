@@ -9,6 +9,7 @@ import threading
 import time
 
 from .. import storage
+from ..utils.safe_error import safe_error
 
 task_lock = threading.Lock()
 RUNNING_TASKS = {}
@@ -72,7 +73,8 @@ def task_finish(t, status, error=""):
         return
     with task_lock:
         t["status"] = status
-        t["error"] = str(error)
+        # 成功的任务不能带 error 字段：前端把任何含 error 的响应当失败，完成提示会弹成红色报错并卡住进度
+        t["error"] = "" if status == "done" else safe_error(error)
         t["ended"] = time.time()
         if status == "done" and t.get("mode") != "stage":
             t["progress"] = 100  # stage 模式没有真实百分比，不伪造 100%

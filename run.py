@@ -25,6 +25,9 @@ def main():
     args = parser.parse_args()
 
     print(f"Starting Experiment Report Grader on http://{args.host}:{args.port}")
+    if args.debug:
+        print("警告：--debug 会打开 Werkzeug 交互式调试器（等于开放远程代码执行），"
+              "且应用没有登录态；只在完全可信的本机临时排障时使用。")
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 

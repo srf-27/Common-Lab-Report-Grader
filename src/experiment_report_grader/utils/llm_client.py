@@ -5,6 +5,7 @@ import threading
 import time
 
 import yaml
+import httpx
 from pathlib import Path
 from openai import OpenAI
 
@@ -12,13 +13,25 @@ _CLIENTS = {}
 _CLIENTS_LOCK = threading.Lock()
 
 
-def openai_client(api_key, base_url, timeout=300):
+def _sanitize_no_proxy():
+    """NO_PROXY 写成 [::1] 会让 httpx 解析端口崩掉（Invalid port: ':1]'），去掉方括号即可。"""
+    for var in ("NO_PROXY", "no_proxy"):
+        value = os.environ.get(var)
+        if not value or "[" not in value:
+            continue
+        os.environ[var] = ",".join(
+            part.strip().strip("[]") for part in value.split(",") if part.strip())
+
+
+def openai_client(api_key, base_url, timeout=90):
     """复用 OpenAI/httpx 连接池；每次 new 客户端会重新做 DNS/TLS 握手。"""
     key = (api_key or "", base_url or "", timeout)
     with _CLIENTS_LOCK:
         client = _CLIENTS.get(key)
         if client is None:
-            client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout, max_retries=0)
+            _sanitize_no_proxy()
+            client = OpenAI(api_key=api_key, base_url=base_url,
+                            timeout=httpx.Timeout(timeout, connect=10.0), max_retries=0)
             _CLIENTS[key] = client
         return client
 
@@ -55,7 +68,10 @@ class LLMClient:
                     return self._call_custom(messages, temperature)
             except Exception as e:
                 last_err = e
-        raise RuntimeError(f"LLM chat failed after {retries} attempts: {last_err}")
+        raise RuntimeError(
+            f"模型连续 {retries} 次调用失败：{last_err}。"
+            "请检查设置页的接口地址与密钥，以及系统代理（HTTP_PROXY / NO_PROXY）设置。"
+            "若持续超时请检查网络或代理设置。")
 
     def _chat_openai(self, messages, temperature, tools=None, tool_executor=None,
                      max_tokens=None, on_response=None):

@@ -12,6 +12,7 @@ from .usage import load as load_usage
 from ..nodes.grader import Grader
 from ..factory import llm
 from ..utils.llm_client import load_config
+from ..utils.student_fields import STUDENT_FIELDS
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "data", "output")
@@ -19,7 +20,6 @@ SESSIONS_DIR = os.path.join(OUTPUT_FOLDER, "sessions")
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
 VALID_LEVELS = ("A", "B", "C", "D", "E")
-STUDENT_FIELDS = ["班级", "学院", "学号", "姓名"]
 SUBDIRS = ("rubrics", "reports", "grading", "uploads")
 
 # 会话隔离的运行态注册表：sid -> 进度 dict。后台线程只更新自己持有的 dict 引用；
@@ -36,8 +36,10 @@ state = {
     "external": {},
     "extracted_reports": [],
     "report_uploads": [],
+    "report_failures": [],
     "grader": None,
     "corrections": {},
+    "overrides": {},
     "calibration": None,
     "grading_status": None,
     "grading_lock": threading.Lock(),
@@ -50,10 +52,16 @@ state = {
 }
 
 
+MAX_FILENAME_STEM = 80  # Windows 路径 260 上限：会话目录已占一截，主干截到 80 字符并保留扩展名
+
+
 def sanitize_filename(name):
     name = os.path.basename(str(name or "")).strip()
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(". ")
-    return name or "unnamed"
+    stem, ext = os.path.splitext(name)
+    if len(stem) > MAX_FILENAME_STEM:
+        stem = stem[:MAX_FILENAME_STEM].rstrip(". ") or "unnamed"
+    return stem + ext if name else "unnamed"
 
 
 def _read_json(path, default):
@@ -125,8 +133,15 @@ def new_session(name):
 
 
 def remove_session(sid):
+    """删除课程：先删会话目录（内含上传原件与向量库），删不掉就抛 OSError，索引保持原样。"""
+    import shutil
+
     idx = load_sessions()
-    idx["sessions"] = [s for s in idx["sessions"] if s["id"] != sid]
+    if any(s["id"] == sid for s in idx["sessions"]):
+        path = os.path.join(SESSIONS_DIR, sid)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        idx["sessions"] = [s for s in idx["sessions"] if s["id"] != sid]
     if not idx["sessions"]:
         save_sessions(idx)
         return new_session("默认课程")
@@ -157,8 +172,11 @@ def hydrate_session(sid):
     # 易失记忆从存储恢复：教师重评意见、上一轮任务/评分的终态、校准工作区
     state["corrections"] = storage.read_json(
         os.path.join(session_dir(sid), "corrections.json"), {}) or {}
+    state["overrides"] = storage.read_json(
+        os.path.join(session_dir(sid), "overrides.json"), {}) or {}
     state["extracted_reports"] = []
     state["report_uploads"] = []
+    state["report_failures"] = []
     state["grader"] = None
     state["rubric"] = None
     state["rubric_json"] = None
@@ -187,6 +205,14 @@ def hydrate_session(sid):
     state.pop("mcp_refs", None)
     state.pop("criteria_upload", None)
     state.pop("criteria_experiment", None)
+    # 重启/切课后 state 里的标准文件路径丢失：从 uploads 的 criteria_/experiment_ 前缀按 mtime 最新恢复
+    updir = os.path.join(session_dir(sid), "uploads")
+    if os.path.isdir(updir):
+        for prefix, key in (("criteria_", "criteria_upload"), ("experiment_", "criteria_experiment")):
+            found = [os.path.join(updir, n) for n in os.listdir(updir)
+                     if n.startswith(prefix) and os.path.isfile(os.path.join(updir, n))]
+            if found:
+                state[key] = max(found, key=os.path.getmtime)
     state["usage"] = load_usage(session_dir(sid))
     for sub in SUBDIRS:
         os.makedirs(os.path.join(SESSIONS_DIR, sid, sub), exist_ok=True)
@@ -218,6 +244,11 @@ def hydrate_session(sid):
                         config=state["config"], output_dir=os.path.join(session_dir(sid), "grading"),
                         similarity_scope=sid, kb_session_dir=session_dir(sid))
         grader.results = results
+        # 落盘的小计可能是旧口径算的（如权重归一之前）：加载时按当前细则重算
+        for r in results:
+            scores = (r.get("grading") or {}).get("scores")
+            if isinstance(scores, dict) and scores:
+                r["grading"]["subtotals"] = rubric_io.compute_subtotals(scores, rubric_json)
         state["grader"] = grader
 
     external = external_scores.load(session_dir(sid))

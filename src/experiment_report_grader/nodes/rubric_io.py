@@ -7,7 +7,7 @@ LEVELS = ("A", "B", "C", "D", "E")
 RUBRIC_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "output", "rubrics", "rubric_current.json")
 
 
-def new_criterion(name="", weight=0, mechanical=False, doc_ref="", levels=None, rules=None,
+def new_criterion(name="", weight=0, mechanical=False, doc_ref="", levels=None,
                   excluded=False, non_report=False):
     return {
         "name": name,
@@ -18,8 +18,15 @@ def new_criterion(name="", weight=0, mechanical=False, doc_ref="", levels=None, 
         "doc_ref": doc_ref,
         "levels": levels or {lv: "" for lv in LEVELS},
         "user_edited": [],
-        "rules": rules,
     }
+
+
+def _weight(criterion):
+    """权重只接受非负数字，其余（字符串、负数、缺省）按 0 计——负权重会让总分反向扣分。"""
+    value = criterion.get("weight")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return 0.0
+    return float(value)
 
 
 def normalize_weights(criteria):
@@ -27,13 +34,13 @@ def normalize_weights(criteria):
     n = len(active)
     if n == 0:
         return criteria
-    total = sum(c.get("weight", 0) for c in active)
+    total = sum(_weight(c) for c in active)
     if total <= 0:
         for c in active:
             c["weight"] = round(100.0 / n, 2)
     else:
         for c in active:
-            c["weight"] = round(c.get("weight", 0) * 100.0 / total, 2)
+            c["weight"] = round(_weight(c) * 100.0 / total, 2)
     drift = 100.0 - sum(c["weight"] for c in active)
     if active and abs(drift) > 0.01:
         active[0]["weight"] = round(active[0]["weight"] + drift, 2)
@@ -80,16 +87,21 @@ LEVEL_POINTS = {"A": 95, "B": 80, "C": 60, "D": 40, "E": 0}
 def compute_subtotals(scores, rubric):
     weights = rubric_weights(rubric)
     fallback = 100.0 / len(scores) if scores else 0.0
-    procedural = semantic = 0.0
     mech_names = {c["name"] for c in rubric.get("criteria", []) if c.get("mechanical")}
+    parts = []
     for criterion, detail in scores.items():
         w = weights.get(criterion, fallback)
         # 外部成绩单直接给百分制分数；其余按等级换算
         points = detail.get("score")
         if points is None:
             points = LEVEL_POINTS.get(detail.get("level"), 0)
-        pts = float(points) * w / 100.0
-        if criterion in mech_names:
+        parts.append((float(points), w, criterion in mech_names))
+    # 被禁用/未评分的维度不占分：按实际参与评分的权重折算回百分制，否则满分塌陷
+    active = sum(w for _, w, _ in parts) or 100.0
+    procedural = semantic = 0.0
+    for points, w, mech in parts:
+        pts = points * w / active
+        if mech:
             procedural += pts
         else:
             semantic += pts
