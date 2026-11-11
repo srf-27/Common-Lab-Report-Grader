@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { errorText, postForm } from "../lib/api";
+import { errorText, getJSON, postForm } from "../lib/api";
 import { LEVEL_LABEL, statusMeta, timeText, totalScore } from "../lib/format";
 import { useData } from "../lib/hooks";
 import { Prose } from "../lib/markdown";
+import { navigate } from "../lib/router";
 import { toast } from "../lib/toast";
 import {
   Badge,
@@ -24,15 +25,46 @@ export default function ReportDetail({ filename }) {
   const [editing, setEditing] = useState(false);
   const [student, setStudent] = useState({});
   const [busy, setBusy] = useState(false);
+  const [fullText, setFullText] = useState(null);
+  const [fullBusy, setFullBusy] = useState(false);
 
   const fields = data?.fields || [];
   const result = data?.result;
+  const failure = data?.failure;
   const meta = statusMeta(result?.status);
   const total = totalScore(result);
   const blocks = data?.blocks || [];
   const graded = result?.status === "graded";
   const studentName =
     data?.student?.["姓名"] || Object.values(data?.student || {}).find((value) => value);
+
+  const regrade = async () => {
+    setBusy(true);
+    try {
+      await postForm(`/regrade/${encodeURIComponent(filename)}`, {
+        next: `/app/report/${encodeURIComponent(filename)}`,
+      });
+      toast("已提交重评", "ok");
+      navigate("/app/progress");
+    } catch (err) {
+      toast(errorText(err), "danger");
+      setBusy(false);
+    }
+  };
+
+  const openFullText = async () => {
+    setFullText({ pages: [] });
+    setFullBusy(true);
+    try {
+      const payload = await getJSON(`/report_text/${encodeURIComponent(filename)}`);
+      setFullText({ pages: payload.pages || [] });
+    } catch (err) {
+      toast(errorText(err), "danger");
+      setFullText(null);
+    } finally {
+      setFullBusy(false);
+    }
+  };
 
   const saveStudent = async () => {
     setBusy(true);
@@ -95,8 +127,44 @@ export default function ReportDetail({ filename }) {
 
       {loading && !data ? <Spinner label="读取报告…" /> : null}
 
+      {result?.truncated ? (
+        <div style={{ marginBottom: 16 }}>
+          <Banner
+            tone="warn"
+            icon="alert"
+            actions={
+              <Button size="sm" icon="external" onClick={openFullText}>
+                查看完整原文
+              </Button>
+            }
+          >
+            正文较长，判级仅使用前 {result.truncated.prompt_chars} 字（全文约{" "}
+            {result.truncated.total_chars} 字），结论部分请人工复核。
+          </Banner>
+        </div>
+      ) : null}
+
       {data ? (
         <div className="split">
+          {failure ? (
+            <Group title="未能评分" note={statusMeta(failure.status).label}>
+              <div className="list-row" style={{ display: "block" }}>
+                <Banner
+                  tone={statusMeta(failure.status).tone === "danger" ? "danger" : "warn"}
+                  icon="alert"
+                >
+                  <strong>{statusMeta(failure.status).label}</strong>
+                  {failure.reason ? `：${failure.reason}` : ""}
+                </Banner>
+                <div className="row-wrap" style={{ gap: 8, marginTop: 12 }}>
+                  <Button variant="filled" icon="refresh" loading={busy} onClick={regrade}>
+                    重新评分
+                  </Button>
+                  <span className="row-sub">这份报告没有评出结果，修正后可重新评分。</span>
+                </div>
+              </div>
+            </Group>
+          ) : (
           <Group title="维度切分" note={`${blocks.length} 个维度块`}>
             {!graded ? (
               <div style={{ marginBottom: 12 }}>
@@ -196,6 +264,7 @@ export default function ReportDetail({ filename }) {
               </div>
             )}
           </Group>
+          )}
 
           <div className="stack side-sticky">
             <Group title="评分" note={result ? meta.label : "未评分"}>
@@ -328,6 +397,31 @@ export default function ReportDetail({ filename }) {
             </Field>
           ))}
         </div>
+      </Sheet>
+
+      <Sheet
+        open={Boolean(fullText)}
+        wide
+        title="完整原文"
+        text={filename}
+        onClose={() => setFullText(null)}
+        footer={
+          <Button variant="filled" onClick={() => setFullText(null)}>
+            关闭
+          </Button>
+        }
+      >
+        {fullBusy ? (
+          <Spinner label="读取全文…" />
+        ) : (
+          (fullText?.pages || []).map((page, pageIndex) => (
+            <div key={pageIndex} style={{ marginBottom: 12 }}>
+              {page.map((chunk, chunkIndex) => (
+                <Prose key={chunkIndex} text={chunk} />
+              ))}
+            </div>
+          ))
+        )}
       </Sheet>
     </>
   );

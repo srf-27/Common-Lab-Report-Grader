@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "../lib/router";
 import { useApp } from "../lib/store";
+import { useData } from "../lib/hooks";
 import {
   Badge,
   Banner,
@@ -24,6 +25,9 @@ export default function Workbench() {
   const { boot, switchSession, removeSession } = useApp();
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 一致性计算较重，已从 12s 轮询的 bootstrap 拆出，工作台打开时单独取一次
+  const { data: agreementData } = useData("/api/agreement");
+  const agreement = agreementData?.agreement;
 
   const { rubric, reports, approved, unapproved, stage } = boot;
   const steps = [
@@ -88,6 +92,7 @@ export default function Workbench() {
         <Stat label="评分维度" value={rubric.count} suffix="个" />
         <Stat label="实验报告" value={reports.total} suffix="份" />
         <Stat label="已评分" value={reports.graded} suffix="份" />
+        <Stat label="需人工" value={reports.needs_review || 0} suffix="份" />
         <Stat label="待终审" value={unapproved} suffix="份" />
       </div>
 
@@ -129,28 +134,28 @@ export default function Workbench() {
           sub={
             reports.graded
               ? `已终审 ${approved} 份，剩 ${unapproved} 份待终审`
-              : "逐份判级、改等级、写评语，终审后进入案例库"
+              : "逐份判级、改等级、写评语，终审后判级成为本课程范例"
           }
           value={`${reports.graded}/${reports.total || 0}`}
           chevron
         />
       </Group>
 
-      {boot.agreement ? (
-        <Group title="与教师真值的一致性" note={`${boot.agreement.n} 组对照`}>
+      {agreement ? (
+        <Group title="与教师真值的一致性" note={`${agreement.n} 组对照`}>
           <div className="list-row" style={{ gap: 12 }}>
             <div className="grow kv">
               <div>
                 <div className="kv-key">Cohen's κ</div>
-                <div className="t-title-3 tnum">{metric(boot.agreement.cohen_kappa)}</div>
+                <div className="t-title-3 tnum">{metric(agreement.cohen_kappa)}</div>
               </div>
               <div>
                 <div className="kv-key">二次加权 κ</div>
-                <div className="t-title-3 tnum">{metric(boot.agreement.weighted_kappa)}</div>
+                <div className="t-title-3 tnum">{metric(agreement.weighted_kappa)}</div>
               </div>
               <div>
                 <div className="kv-key">Krippendorff's α</div>
-                <div className="t-title-3 tnum">{metric(boot.agreement.krippendorff_alpha)}</div>
+                <div className="t-title-3 tnum">{metric(agreement.krippendorff_alpha)}</div>
               </div>
             </div>
             <LinkButton to="/app/results" size="sm">

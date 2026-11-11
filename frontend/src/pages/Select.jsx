@@ -17,12 +17,11 @@ import {
   Spinner,
 } from "../ui";
 
-const FLAGGED = ["flagged_injection", "blocked_safety", "llm_failed", "detection_failed", "audit_truncated"];
+const FLAGGED = ["flagged_injection", "blocked_safety", "flagged_duplicate", "llm_failed", "detection_failed", "audit_truncated"];
 
 const FILTERS = [
   { key: "all", label: "全部" },
   { key: "pending", label: "未评分" },
-  { key: "stale", label: "需重评" },
   { key: "graded", label: "已评分" },
   { key: "flagged", label: "被标记" },
 ];
@@ -36,14 +35,13 @@ export default function Select() {
   const groups = data?.groups || [];
   const total = data?.total || 0;
   const ungraded = useMemo(
-    () => groups.reduce((sum, group) => sum + group.reports.filter((r) => !r.stale && !r.graded).length, 0),
+    () => groups.reduce((sum, group) => sum + group.reports.filter((r) => !r.graded).length, 0),
     [groups]
   );
 
   const matched = (report) => {
-    if (filter === "pending") return !report.graded && !report.stale;
-    if (filter === "stale") return Boolean(report.stale);
-    if (filter === "graded") return report.graded && !report.stale;
+    if (filter === "pending") return !report.graded;
+    if (filter === "graded") return report.graded;
     if (filter === "flagged") return FLAGGED.includes(report.status);
     return true;
   };
@@ -52,9 +50,8 @@ export default function Select() {
     const all = groups.flatMap((group) => group.reports);
     return {
       all: all.length,
-      pending: all.filter((r) => !r.graded && !r.stale).length,
-      stale: all.filter((r) => r.stale).length,
-      graded: all.filter((r) => r.graded && !r.stale).length,
+      pending: all.filter((r) => !r.graded).length,
+      graded: all.filter((r) => r.graded).length,
       flagged: all.filter((r) => FLAGGED.includes(r.status)).length,
     };
   }, [groups]);
@@ -71,7 +68,7 @@ export default function Select() {
     () => groups.flatMap((group) => group.reports).filter((r) => selected.has(r.filename)),
     [groups, selected]
   );
-  const reselecting = selectedReports.some((r) => r.graded || r.stale);
+  const reselecting = selectedReports.some((r) => r.graded);
 
   const toggle = (group, report) => {
     setSelected((prev) => {
@@ -241,8 +238,7 @@ export default function Select() {
                             {report.images ? ` · ${report.images} 图` : ""}
                           </span>
                         </span>
-                        {report.stale ? <Badge tone="warn">需重评</Badge> : null}
-                        {!report.stale && report.graded ? <Badge tone="ok">已评分</Badge> : null}
+                        {report.graded ? <Badge tone="ok">已评分</Badge> : null}
                         {report.status && report.status !== "graded" ? (
                           <Badge tone={meta.tone}>{meta.label}</Badge>
                         ) : null}

@@ -56,6 +56,7 @@ export default function Rubric() {
   const [externalFile, setExternalFile] = useState(null);
   const [externalBusy, setExternalBusy] = useState(false);
   const [confirmReset, setConfirmReset] = useState(null); // null | "save" | "generate"
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
   const [deletingPilot, setDeletingPilot] = useState(null);
   const [clearingExternal, setClearingExternal] = useState(false);
   const [pilotFiles, setPilotFiles] = useState([]);
@@ -117,8 +118,11 @@ export default function Rubric() {
       if (next.status !== "running") {
         setPilotPolling(false);
         if (next.status === "done") {
-          toast("样本已评完，请填写你的等级", "ok");
-          loadPilot();
+          const fresh = await loadPilot();
+          const bad = (fresh?.reports || []).filter((r) => r.status && r.status !== "graded");
+          toast(bad.length
+            ? `样本评完，${bad.length} 份模型失败：${bad[0].filename}`
+            : "样本已评完，请填写你的等级", bad.length ? "danger" : "ok");
         } else if (next.status === "error") {
           toast(next.error || "样本评分失败", "danger");
         }
@@ -245,6 +249,27 @@ export default function Rubric() {
     excludableDims.length > 0 && excludableDims.every((item) => item.excluded);
   const externalDims = data?.external?.dimensions || {};
 
+  // 镜像后端 pilot_confirm 门槛：≥1 份样本、全部已评、每个未停用维度至少有一份样本给了合法教师等级
+  const pilotMissing = useMemo(() => {
+    const reports = pilotData?.reports || [];
+    if (!reports.length) return ["至少上传并完成 1 份样本"];
+    const missing = [];
+    const notGraded = reports.filter((r) => r.status !== "graded").length;
+    if (notGraded) missing.push(`${notGraded} 份样本还没评完`);
+    const covered = new Set();
+    reports.forEach((r) =>
+      Object.entries(r.teacher || {}).forEach(([name, level]) => {
+        if (LEVELS.includes(level)) covered.add(name);
+      })
+    );
+    const noLevel = draft
+      .filter((item) => !item.excluded)
+      .map((item) => item.name)
+      .filter((name) => !covered.has(name));
+    if (noLevel.length) missing.push(`维度缺你的等级：${noLevel.join("、")}`);
+    return missing;
+  }, [pilotData, draft]);
+
   const patch = (index, changes) =>
     setDraft((list) => list.map((item, i) => (i === index ? { ...item, ...changes } : item)));
 
@@ -316,7 +341,7 @@ export default function Rubric() {
       await postJSON("/rubric_table_save", {
         criteria: draft.map((item) => ({
           name: String(item.name).trim(),
-          weight: Number(item.weight) || 0,
+          weight: Math.max(0, Number(item.weight) || 0),
           excluded: Boolean(item.excluded),
           non_report: Boolean(item.non_report),
           doc_ref: item.doc_ref || "",
@@ -658,10 +683,7 @@ export default function Rubric() {
               variant="plain"
               icon="trash"
               disabled={!excludableDims.length || busy}
-              onClick={() => {
-                setDraft((list) => list.filter((item) => !(item.can_exclude || item.excluded)));
-                toast("已删去不相干维度，保存后其余权重自动归一到 100%", "ok");
-              }}
+              onClick={() => setConfirmBulkDelete(true)}
             >
               删去不相干维度（不保留分值）
             </Button>
@@ -753,6 +775,10 @@ export default function Rubric() {
                       step="0.5"
                       value={item.weight}
                       onChange={(event) => patch(index, { weight: event.target.value })}
+                      onBlur={(event) => {
+                        const value = Number(event.target.value);
+                        patch(index, { weight: Number.isFinite(value) && value > 0 ? value : 0 });
+                      }}
                     />
                   )}
                 </Field>
@@ -987,15 +1013,18 @@ export default function Rubric() {
             variant="filled"
             icon="check"
             onClick={confirmPilot}
-            disabled={pilotBusy || pilotData?.confirmed}
+            disabled={pilotBusy || pilotData?.confirmed || pilotMissing.length > 0}
             loading={pilotBusy}
+            title={pilotMissing.length ? `还不能确认：${pilotMissing.join("；")}` : undefined}
           >
             {pilotData?.confirmed ? "已确认" : "确认细则，进入下一步"}
           </Button>
           {pilotData?.confirmed ? (
             <span className="row-sub">可以直接上传报告了</span>
+          ) : pilotMissing.length ? (
+            <span className="row-sub">还差：{pilotMissing.join("；")}</span>
           ) : (
-            <span className="row-sub">未用样本也可确认，但不会显示一致性</span>
+            <span className="row-sub">样本、评分与你的等级都齐了，可以确认</span>
           )}
         </div>
       </Group>
@@ -1089,6 +1118,28 @@ export default function Rubric() {
           </Button>
         </div>
       ) : null}
+
+      <Sheet
+        open={confirmBulkDelete}
+        title="删去不相干维度？"
+        text={`会从草稿里删掉 ${excludableDims.length} 个与报告无关的维度，保存后其余权重自动归一到 100%；刷新未保存可恢复。`}
+        onClose={() => setConfirmBulkDelete(false)}
+        footer={
+          <>
+            <Button onClick={() => setConfirmBulkDelete(false)}>取消</Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setDraft((list) => list.filter((item) => !(item.can_exclude || item.excluded)));
+                setConfirmBulkDelete(false);
+                toast("已删去不相干维度，保存后其余权重自动归一到 100%", "ok");
+              }}
+            >
+              删去
+            </Button>
+          </>
+        }
+      />
 
       <Sheet
         open={Boolean(warnings)}
