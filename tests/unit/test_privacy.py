@@ -2,9 +2,13 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+_ROOT = Path(__file__).resolve().parents[2]
+for _p in (str(_ROOT / "src"), str(_ROOT / "tests")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from experiment_report_grader.utils.privacy import anonymize_text
+from real_llm import client
 
 
 class LLM:
@@ -44,6 +48,14 @@ def test_longest_entity_replaced_first():
               '{"type": "address", "value": "张三宿舍 3 栋"}]}')
     out, _ = anonymize_text("住址：张三宿舍 3 栋", llm)
     assert "张三宿舍" not in out
+
+
+def test_anonymize_real_llm_removes_pii():
+    """真模型端到端红线：姓名/学号/邮箱/电话都必须从产出中消失。"""
+    out, made = anonymize_text(TEXT, client())
+    for pii in ("张三", "20230001", "zhang@example.com", "13800001111"):
+        assert pii not in out, (pii, out)
+    assert made
 
 
 if __name__ == "__main__":

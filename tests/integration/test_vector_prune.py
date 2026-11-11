@@ -67,6 +67,12 @@ def test_confirm_creates_dimension_collections():
             {"name": "维度甲", "weight": 50, "levels": {}},
             {"name": "维度乙", "weight": 50, "levels": {}},
         ]}
+        # B4 门槛：确认前需要 1 份已评样本，且每个启用维度都有教师等级
+        app_mod._save_pilot({"reports": [
+            {"filename": "样本.docx", "status": "graded",
+             "ai": {"维度甲": "A", "维度乙": "B"},
+             "teacher": {"维度甲": "A", "维度乙": "B"}}],
+            "confirmed_at": 0, "rubric_hash": ""})
         client = app_mod.app.test_client()
         assert client.post("/pilot/confirm").status_code == 200
 

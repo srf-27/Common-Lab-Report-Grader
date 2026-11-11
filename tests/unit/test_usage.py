@@ -17,13 +17,22 @@ def _ts(hour, minute=0):
 
 
 def test_cc_switch_style_cost():
+    import time as _time
     from experiment_report_grader.web import pricing
-    amt, cur = pricing.cost_of("deepseek-flash", 100_000, 50_000, 0, 10_000)
-    assert cur == "USD"
-    assert abs(amt - (100_000 * 0.15 + 50_000 * 0.003 + 10_000 * 0.6) / 1e6) < 1e-9
-    # 四槽齐全的模型：缓存写也计价
-    amt2, _ = pricing.cost_of("claude-sonnet-4-5", 0, 0, 1_000_000, 0)
-    assert abs(amt2 - 3.75) < 1e-9
+    # deepseek 官方 CNY 分时：高峰全价，空闲半价（2026-10-27 周二 10 点高峰 / 10-25 周日空闲）
+    peak = _time.mktime(_time.strptime("2026-10-27 10:00:00", "%Y-%m-%d %H:%M:%S"))
+    off = _time.mktime(_time.strptime("2026-10-25 22:00:00", "%Y-%m-%d %H:%M:%S"))
+    amt, cur = pricing.cost_of("deepseek-flash", 100_000, 50_000, 0, 10_000, ts=peak)
+    assert cur == "CNY" and amt is not None
+    expect_peak = (100_000 * 2 + 50_000 * 0.04 + 10_000 * 8) / 1e6
+    assert abs(amt - expect_peak) < 1e-9
+    amt_off, _ = pricing.cost_of("deepseek-flash", 100_000, 50_000, 0, 10_000, ts=off)
+    assert abs(amt_off - expect_peak / 2) < 1e-9
+    # 官方分时条目不被 models.dev 同步覆盖
+    assert pricing.lookup("deepseek-flash")["input"] == 2
+    # 非官方厂商：USD、无分时
+    amt2, cur2 = pricing.cost_of("claude-sonnet-4-5", 0, 0, 1_000_000, 0)
+    assert cur2 == "USD" and abs(amt2 - 3.75) < 1e-9
     # 未定价：None，不乱算
     assert pricing.cost_of("no-such-model", 1, 0, 0, 1) == (None, None)
 
