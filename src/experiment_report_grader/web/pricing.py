@@ -19,11 +19,15 @@ import urllib.request
 TTL_SECONDS = 6 * 3600
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
 
-# models.dev 快照（USD / 百万 token），同步不可用时兜底
+# 内置价目（每百万 token）：无标记为 models.dev 快照（USD）；deepseek 为官方价
+# ——人民币、分时（高峰 9-12/14-18 工作日，空闲半价），同步不覆盖 official 条目
 BUILTIN = {
-    "deepseek/deepseek-flash": {"input": 0.15, "output": 0.6, "cache_read": 0.003},
-    "deepseek/deepseek-v4-flash": {"input": 0.15, "output": 0.6, "cache_read": 0.003},
-    "deepseek/deepseek-v4-pro": {"input": 0.66, "output": 1.98, "cache_read": 0.022},
+    "deepseek/deepseek-flash": {"input": 2, "output": 8, "cache_read": 0.04,
+                                "currency": "CNY", "official": True, "offpeak": 0.5},
+    "deepseek/deepseek-v4-flash": {"input": 2, "output": 8, "cache_read": 0.04,
+                                   "currency": "CNY", "official": True, "offpeak": 0.5},
+    "deepseek/deepseek-v4-pro": {"input": 9, "output": 27, "cache_read": 0.30,
+                                 "currency": "CNY", "official": True, "offpeak": 0.5},
     "openai/gpt-5-mini": {"input": 0.25, "output": 2, "cache_read": 0.025},
     "openai/gpt-5-nano": {"input": 0.05, "output": 0.4, "cache_read": 0.005},
     "openai/gpt-4.1-nano": {"input": 0.1, "output": 0.4, "cache_read": 0.025},
@@ -31,6 +35,17 @@ BUILTIN = {
     "anthropic/claude-haiku-4-5": {"input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25},
     "google/gemini-pro-latest": {"input": 2, "output": 12, "cache_read": 0.2},
 }
+
+# DeepSeek 官方分时：工作日（不含法定节假日）北京时间 9-12 / 14-18 为高峰
+PEAK_HOURS = ((9, 12), (14, 18))
+
+
+def is_peak(ts=None):
+    import time as _time
+    lt = _time.localtime(ts or _time.time())
+    if lt.tm_wday >= 5:  # 周六日恒为空闲；法定节假日按官方另行公布，此处从简
+        return False
+    return any(start <= lt.tm_hour < end for start, end in PEAK_HOURS)
 
 _LOCK = threading.Lock()
 _cache = None
@@ -72,6 +87,7 @@ def _normalize(entry):
             "cache_read": float(raw_read) if raw_read is not None else 0.0,
             "cache_write": float(entry.get("cache_write") or 0),
             "currency": str(entry.get("currency") or "USD"),
+            "offpeak": float(entry["offpeak"]) if entry.get("offpeak") is not None else None,
         }
     except (TypeError, ValueError):
         return None
@@ -79,7 +95,7 @@ def _normalize(entry):
         price["cache_read"] = 0.1 * price["input"]
     if price["cache_write"] <= 0:
         price["cache_write"] = 1.25 * price["input"]
-    return price if price["input"] or price["output"] else None
+    return price  # 全 0（免费模型）也返回：计 0 元而非「未定价」
 
 
 def _fetch_models_dev():
@@ -135,9 +151,16 @@ def _load_overrides():
 
 
 def table():
-    """合并后的价目：overrides > models.dev 同步 > 内置快照。键为清洗前的原始 ID。"""
-    merged = dict(BUILTIN)
-    merged.update(_load_synced())
+    """合并后的价目：overrides > 同步 > 内置；官方分时条目（official）不被同步覆盖。"""
+    merged = {k: dict(v) for k, v in BUILTIN.items()}
+    official = {k for k, v in merged.items() if v.get("official")}
+    official_ids = {clean_id(k) for k in official}
+    official_ids.discard("")
+    for k, v in _load_synced().items():
+        # 与官方同名（清洗后）的第三方转售商条目剔除：价格五花八门，会污染官方名匹配
+        if k in official or clean_id(k) in official_ids:
+            continue
+        merged[k] = v
     merged.update(_load_overrides())
     return merged
 
@@ -154,15 +177,18 @@ def lookup(model_id):
     return None
 
 
-def cost_of(model_id, tokens_in_new, tokens_cache_read, tokens_cache_write, tokens_out):
-    """返回 (金额, 币种)；未定价返回 (None, None)。"""
+def cost_of(model_id, tokens_in_new, tokens_cache_read, tokens_cache_write, tokens_out, ts=None):
+    """返回 (金额, 币种)；未定价返回 (None, None)。官方分时厂商按调用时刻取价。"""
     price = lookup(model_id)
     if price is None:
         return None, None
+    scale = 1.0
+    if price.get("offpeak") is not None and not is_peak(ts):
+        scale = price["offpeak"]
     amount = (tokens_in_new * price["input"]
               + tokens_cache_read * price["cache_read"]
               + tokens_cache_write * price["cache_write"]
-              + tokens_out * price["output"]) / 1_000_000
+              + tokens_out * price["output"]) * scale / 1_000_000
     return round(amount, 6), price["currency"]
 
 

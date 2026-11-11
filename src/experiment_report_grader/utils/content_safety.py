@@ -2,6 +2,8 @@
 
 import json
 
+from .safe_error import safe_error
+
 SAFETY_PROMPT = """你是内容安全审核员。判断下面这份学生提交的文本是否存在「传播不良思想」的内容，
 包括但不限于：危害国家安全、反对宪法确定的基本原则、煽动颠覆国家政权、破坏国家统一、
 宣扬恐怖主义/极端主义、煽动民族仇恨、宣扬暴力/血腥、教唆犯罪、宣扬毒品/赌博/邪教等。
@@ -31,20 +33,24 @@ def _extract_json(text):
 
 
 def check_content_safety(text, llm):
-    """LLM 语义检测；LLM 失败时 fail-open（放行）并标记 detection_failed。"""
+    """LLM 语义检测；LLM 失败时 fail-open（放行）并标记 detection_failed，warned 留可读痕迹。"""
     try:
         resp = llm.chat([{"role": "user", "content": SAFETY_PROMPT.format(text=text)}], temperature=0)
         data = _extract_json(resp)
     except Exception as e:
-        return {"verdict": "safe", "blocked": [], "warned": [],
-                "detector": "llm", "detection_failed": True, "error": str(e)}
+        err = safe_error(e)
+        return {"verdict": "safe", "blocked": [],
+                "warned": [{"category": "内容安全检测失败", "evidence": err}],
+                "detector": "llm", "detection_failed": True, "error": err}
     blocked = data.get("verdict") == "blocked"
+    categories = data.get("categories") or []
+    evidence = data.get("evidence", "")
     result = {"verdict": "blocked" if blocked else "safe",
-              "categories": data.get("categories") or [],
-              "evidence": data.get("evidence", ""),
+              "categories": categories,
+              "evidence": evidence,
               "confidence": data.get("confidence", ""),
-              "detector": "llm"}
+              "detector": "llm",
+              "warned": [] if blocked else [{"category": c, "evidence": evidence} for c in categories]}
     if blocked:
-        result["blocked"] = [{"category": c, "evidence": result["evidence"]}
-                             for c in result["categories"]]
+        result["blocked"] = [{"category": c, "evidence": evidence} for c in categories]
     return result

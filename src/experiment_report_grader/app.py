@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -25,6 +26,8 @@ from .nodes.rubric_generator import RubricGenerator
 from .utils.file_parser import collect_report_files
 from .utils import calc_tools
 from .utils import skills as skills_loader
+from .utils.safe_error import safe_error
+from .utils.student_fields import canonical_field, student_value
 from . import storage
 from .web.state import (
     OUTPUT_FOLDER, PROJECT_ROOT, RUNNING_STATUS, SESSIONS_DIR, STUDENT_FIELDS, VALID_LEVELS,
@@ -49,6 +52,10 @@ STAGES = [
     ("review", "④ 待终审"),
     ("done", "⑤ 完成"),
 ]
+
+# 所有「已处理完」的终态：阶段机、counts、放行/改分校验统一引用，禁止在多处硬编码列表
+TERMINAL_STATUSES = {"graded", "flagged_injection", "blocked_safety", "llm_failed",
+                     "detection_failed", "audit_truncated", "flagged_duplicate"}
 
 
 def _bootstrap():
@@ -83,7 +90,7 @@ def _read_doc_text(filepath):
     return _read_text(filepath)
 
 
-def _chunks(text, limit=30):
+def _chunks(text, limit=None):
     r"""按空行切段，但跨行的 \[ ... \] 公式块保持在同一块内。"""
     blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
     merged, pending = [], None
@@ -100,6 +107,8 @@ def _chunks(text, limit=30):
             merged.append(block)
     if pending:
         merged.append(pending)
+    if limit is None:
+        limit = ((state.get("config") or {}).get("grading") or {}).get("max_display_chunks", 30)
     return merged[:limit]
 
 
@@ -121,7 +130,7 @@ def _rubric_mtime():
 
 
 def _result_stale(result):
-    if result.get("status") not in ("graded", "llm_failed", "flagged_injection", "blocked_safety"):
+    if result.get("status") not in TERMINAL_STATUSES:
         return False
     graded_at = result.get("graded_at")
     mtime = _rubric_mtime()
@@ -130,7 +139,14 @@ def _result_stale(result):
 
 def _student_fields():
     roster = load_roster()
-    return roster["headers"] if roster else STUDENT_FIELDS
+    if not roster:
+        return STUDENT_FIELDS
+    fields = []
+    for header in roster["headers"]:
+        field = canonical_field(header)
+        if field not in fields:
+            fields.append(field)
+    return fields
 
 
 def _find_entry(filename):
@@ -162,6 +178,27 @@ def _busy():
     return task_running() or (state.get("grading_status") or {}).get("phase") == "running"
 
 
+# 破坏性路由的双提交 CSRF 校验：令牌只出现在本机 SPA 页面里，跨站表单/DNS rebinding 读不到，
+# 也就发不出这个请求头。本机自用无登录态，这是最低成本的一道门槛。
+CSRF_TOKEN = secrets.token_urlsafe(24)
+CSRF_ROUTES = ("/session/remove", "/settings", "/api/vector/clear", "/api/balance/reset",
+               "/criteria/clear", "/external/clear", "/pilot/delete", "/reports/delete",
+               "/llm/profile/delete", "/mcp/remove")
+
+
+@app.before_request
+def _require_csrf():
+    # shortcut: app.testing 时豁免，改这里要同步 tests/integration/test_csrf.py
+    if request.method != "POST" or app.testing:
+        return None
+    path = request.path
+    if not any(path == route or path.startswith(route + "/") for route in CSRF_ROUTES):
+        return None
+    if request.headers.get("X-CSRF-Token") != CSRF_TOKEN:
+        return jsonify({"error": "页面令牌缺失或已失效，请刷新页面后重试"}), 400
+    return None
+
+
 # ---------------- 会话阶段
 def _session_stage():
     """纯数据推导当前会话阶段，返回 (key, label)。"""
@@ -176,11 +213,12 @@ def _session_stage():
             label += "（待样本确认）"
         return STAGES[2] if running else ("rubric", label)
     graded = [r for r in results if r.get("status") == "graded"]
+    processed = [r for r in results if r.get("status") in TERMINAL_STATUSES]
     total = len([r for r in state["extracted_reports"] if r.get("status") == "ok"])
     unapproved = [r for r in graded if r["report_id"] not in _approved_ids()]
-    if running or len(graded) < total:
+    if running or len(processed) < total:
         return STAGES[2]
-    if unapproved or len(results) > len(graded):
+    if unapproved or len(processed) > len(graded):
         return STAGES[3]
     return STAGES[4]
 
@@ -196,19 +234,29 @@ def session_new():
 def session_switch():
     sid = request.form.get("session_id", "")
     idx = load_sessions()
-    if any(s["id"] == sid for s in idx["sessions"]):
-        idx["current"] = sid
-        save_sessions(idx)
-        hydrate_session(sid)
+    if not any(s["id"] == sid for s in idx["sessions"]):
+        return jsonify({"error": "课程不存在或已被删除，请刷新后重试"}), 404
+    idx["current"] = sid
+    save_sessions(idx)
+    hydrate_session(sid)
     return redirect(request.form.get("next") or "/app/workbench")
 
 
 @app.route("/session/remove", methods=["POST"])
 def session_remove():
     sid = request.form.get("session_id", "")
+    # 删课会 hydrate 到另一门课：任何一门课在跑任务时都不允许，否则后台线程会写进新课程
+    other_task = task_mod.RUNNING_TASKS.get(sid)
+    if _busy() or (other_task or {}).get("status") == "running" \
+            or (RUNNING_STATUS.get(sid) or {}).get("phase") == "running":
+        return jsonify({"error": "有任务正在进行，等它结束或先取消后再删除课程"}), 409
+    try:
+        entry = remove_session(sid)
+    except OSError as e:
+        return jsonify({"error": safe_error(
+            f"课程目录删不掉，可能有文件正被其它程序占用；请关闭占用程序后重试。课程未删除：{e}")}), 409
     RUNNING_STATUS.pop(sid, None)
     task_mod.RUNNING_TASKS.pop(sid, None)
-    entry = remove_session(sid)
     hydrate_session(entry["id"])
     return redirect("/app/workbench")
 
@@ -227,7 +275,6 @@ def _bootstrap_payload():
     uploads = os.path.join(session_dir(), "uploads")
     names = os.listdir(uploads) if os.path.isdir(uploads) else []
     stage_key, stage_label = _session_stage()
-    agreement = _agreement()
     return {
         "session": {"id": state.get("session"), "name": current.get("name", "")},
         "sessions": idx["sessions"],
@@ -235,27 +282,26 @@ def _bootstrap_payload():
         "rubric": {
             "count": len((state.get("rubric_json") or {}).get("criteria") or []),
             "confirmed": _rubric_confirmed(),
-            "hasUpload": any(os.path.splitext(n)[1].lower() in (".docx", ".pdf", ".txt")
-                             and not n.startswith("calibration_") for n in names),
+            "hasUpload": _api_criteria_uploaded(names),
         },
         "reports": {
             "total": len(ok_reports),
             "graded": len(graded & {r["meta"]["filename"] for r in ok_reports}),
+            "terminal": len([r for r in results if r.get("status") in TERMINAL_STATUSES]),
+            "needs_review": len([r for r in results
+                                 if r.get("status") in TERMINAL_STATUSES
+                                 and r.get("status") != "graded"]),
             "hasUpload": any(os.path.splitext(n)[1].lower() in
                              (".pdf", ".docx", ".doc", ".md", ".zip", ".rar", ".7z",
                               ".html", ".htm", ".pptx", ".xlsx", ".epub")
-                             and not n.startswith("calibration_") for n in names),
+                             and not n.startswith(("calibration_", "criteria_", "experiment_"))
+                             for n in names),
         },
         "approved": len(approved),
         "unapproved": len([r for r in results if r["report_id"] not in approved]),
         "mcp": {"mounted": len((state.get("mcp") or {}).get("servers") or [])},
         "usage": state.get("usage") or {},
         "task": state.get("task"),
-        "agreement": ({"n": agreement["overall"]["n"],
-                       "cohen_kappa": agreement["overall"]["cohen_kappa"],
-                       "weighted_kappa": agreement["overall"]["weighted_kappa"],
-                       "krippendorff_alpha": agreement["overall"]["krippendorff_alpha"]}
-                      if agreement and agreement["overall"]["n"] else None),
     }
 
 
@@ -270,6 +316,18 @@ def _agreement():
     return agreement_report(state["grader"].results, state.get("rubric_json") or {}, teacher)
 
 
+@app.route("/api/agreement")
+def api_agreement():
+    # 一致性计算较重（遍历全部结果算 κ/α），从 12s 轮询的 bootstrap 拆出，仅一致性页按需取
+    agreement = _agreement()
+    return jsonify({"agreement": (
+        {"n": agreement["overall"]["n"],
+         "cohen_kappa": agreement["overall"]["cohen_kappa"],
+         "weighted_kappa": agreement["overall"]["weighted_kappa"],
+         "krippendorff_alpha": agreement["overall"]["krippendorff_alpha"]}
+        if agreement and agreement["overall"]["n"] else None)})
+
+
 # ---------------------------------------------------------------- 细则
 @app.route("/upload_criteria", methods=["POST"])
 def upload_criteria():
@@ -280,7 +338,10 @@ def upload_criteria():
         return jsonify({"error": "有任务正在进行，请稍候或先取消"}), 409
     name = sanitize_filename(f.filename)
     filepath = os.path.join(session_sub("uploads"), "criteria_" + name)
-    f.save(filepath)
+    try:
+        f.save(filepath)
+    except OSError as e:
+        return jsonify({"error": safe_error(f"文件保存失败，请缩短文件名后重试：{e}")}), 400
     state["criteria_upload"] = filepath
 
     experiment = request.files.get("experiment_file")
@@ -288,7 +349,10 @@ def upload_criteria():
     if experiment and experiment.filename:
         experiment_name = sanitize_filename(experiment.filename)
         experiment_path = os.path.join(session_sub("uploads"), "experiment_" + experiment_name)
-        experiment.save(experiment_path)
+        try:
+            experiment.save(experiment_path)
+        except OSError as e:
+            return jsonify({"error": safe_error(f"文件保存失败，请缩短文件名后重试：{e}")}), 400
         state["criteria_experiment"] = experiment_path
     else:
         state["criteria_experiment"] = None
@@ -344,13 +408,7 @@ class _ThinkingTap:
 def process_criteria():
     filepath = state.get("criteria_upload")
     if not filepath or not os.path.exists(filepath):
-        updir = session_sub("uploads")
-        candidates = [os.path.join(updir, n) for n in os.listdir(updir)
-                      if os.path.splitext(n)[1].lower() in (".docx", ".pdf", ".txt")]
-        if not candidates:
-            return redirect("/app/workbench")
-        filepath = max(candidates, key=os.path.getmtime)
-        state["criteria_upload"] = filepath
+        return jsonify({"error": "请先上传评分标准文件"}), 409
     if _busy():
         return redirect("/app/workbench")
     if request.form.get("confirm_reset") != "1" and _has_downstream():
@@ -477,9 +535,13 @@ def _has_downstream():
         return True
     if _approved_ids() or state.get("corrections"):
         return True
+    vector_cfg = (state.get("config") or {}).get("vector_store") or {}
+    mode = ((vector_cfg.get("chroma") or {}).get("mode") or "local").lower()
+    # 本地库：kb_db 目录不存在＝没有向量下游，先查目录再决定要不要建 Chroma 客户端
+    if mode != "cloud" and not os.path.isdir(os.path.join(session_dir(), "kb_db")):
+        return False
     try:
-        store = Chroma(config=(state.get("config") or {}).get("vector_store") or {},
-                       session_dir=session_dir(), create=False)
+        store = Chroma(config=vector_cfg, session_dir=session_dir(), create=False)
         return any(collection.count() for collection in store.client.list_collections())
     except Exception:
         return False
@@ -523,8 +585,8 @@ def _apply_external():
     external = state.get("external") or {}
     if not grader or not rubric or not external:
         return 0
-    students = {r["meta"]["filename"]: (r["meta"].get("student") or {})
-                for r in state["extracted_reports"]}
+    students = {(r.get("meta") or {}).get("filename"): ((r.get("meta") or {}).get("student") or {})
+                for r in state["extracted_reports"] if r.get("status") == "ok"}
     return external_scores.apply_to_results(grader.results, rubric, external, students.get)
 
 
@@ -725,7 +787,7 @@ def pilot_run():
                     config=state["config"],
                     output_dir=os.path.join(pilot_dir, "grading"),
                     kb_session_dir=os.path.join(pilot_dir, "kb"))
-    t = task_start("pilot", "/app/rubric")
+    t = task_start("pilot", "/app/rubric", total=len(data["reports"]))
 
     def work():
         try:
@@ -734,7 +796,7 @@ def pilot_run():
                 if task_cancelled(t):
                     task_finish(t, "cancelled")
                     return
-                task_update(t, progress=90 * index / total, detail=entry["filename"])
+                task_update(t, progress=90 * index / total, stage="评分中", detail=entry["filename"])
                 text = _read_text(_pilot_text_path(entry, session_path))
                 chunks = _chunks(text)
                 assignments = grader.assign_items(
@@ -749,9 +811,18 @@ def pilot_run():
                 entry["status"] = outcome["result"].get("status")
                 task_update(t, done=index + 1)
             _save_pilot(data, session_path)
-            task_update(t, progress=100, stage="完成",
-                        detail=f"已用模型评完 {len(data['reports'])} 份样本")
-            task_finish(t, "done")
+            failed = [e["filename"] for e in data["reports"]
+                      if e.get("status") not in (None, "graded")]
+            if failed and len(failed) < len(data["reports"]):
+                detail = f"已用模型评完 {len(data['reports']) - len(failed)} 份样本，" \
+                         f"{len(failed)} 份模型失败（{failed[0]}）"
+            elif failed:
+                detail = f"{len(failed)} 份样本全部模型失败（{failed[0]}）"
+            else:
+                detail = f"已用模型评完 {len(data['reports'])} 份样本"
+            task_update(t, progress=100, stage="完成", detail=detail)
+            task_finish(t, "done" if len(failed) < len(data["reports"]) else "error",
+                        detail if failed else "")
         except Exception as exc:
             task_finish(t, "cancelled" if task_cancelled(t) else "error", exc)
 
@@ -807,6 +878,18 @@ def pilot_confirm():
     if not state.get("rubric_json"):
         return jsonify({"error": "请先生成评分细则"}), 400
     data = _load_pilot()
+    reports = data.get("reports") or []
+    if len(reports) < 1:
+        return jsonify({"error": "请至少上传并完成 1 份样本校准后再确认"}), 400
+    not_graded = [e.get("filename") for e in reports if e.get("status") != "graded"]
+    if not_graded:
+        return jsonify({"error": f"样本「{not_graded[0]}」尚未评分或评分失败，请先运行校准"}), 400
+    active = [c["name"] for c in state["rubric_json"]["criteria"] if not c.get("excluded")]
+    teacher_dims = {name for e in reports for name, level in (e.get("teacher") or {}).items()
+                    if level in VALID_LEVELS}
+    missing = [n for n in active if n not in teacher_dims]
+    if missing:
+        return jsonify({"error": f"还有维度缺少教师等级，无法确认校准：{'、'.join(missing)}"}), 400
     data["confirmed_at"] = time.time()
     data["rubric_hash"] = _rubric_hash()
     _sync_dimension_collections([c["name"] for c in state["rubric_json"]["criteria"]])
@@ -887,11 +970,20 @@ def rubric_table_save():
     if _busy():
         return jsonify({"error": "评分进行中，暂不能修改细则"}), 409
     data = request.get_json(silent=True) or {}
-    criteria = [c for c in (data.get("criteria") or []) if not c.get("_deleted")]
+    raw = data.get("criteria")
+    if not isinstance(raw, list):
+        return jsonify({"error": "criteria 必须是维度数组"}), 400
+    criteria = [c for c in raw if isinstance(c, dict) and not c.get("_deleted")]
     if not criteria:
         return jsonify({"error": "至少保留一个评分维度"}), 400
     if any(not str(c.get("name", "")).strip() for c in criteria):
         return jsonify({"error": "存在未命名维度，请填写维度名称"}), 400
+    for criterion in criteria:
+        weight = criterion.get("weight")
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            return jsonify({"error": f"「{criterion.get('name')}」的权重必须是数字"}), 400
+        if weight < 0:
+            return jsonify({"error": f"「{criterion.get('name')}」的权重不能为负数"}), 400
     if not data.get("confirm_reset") and _has_downstream():
         return jsonify({"needReset": True,
                         "error": "保存细则会清除已提取的报告、评分结果与向量库（上传原件保留），请确认后重试"}), 409
@@ -947,6 +1039,17 @@ def calibrate_upload():
 
 
 # ---------------------------------------------------------------- 报告
+def _unique_upload_path(upload_dir, name):
+    """同名文件直接落盘会互相覆盖：按 stem (2).ext、stem (3).ext … 找第一个不冲突的名字。"""
+    if not os.path.exists(os.path.join(upload_dir, name)):
+        return os.path.join(upload_dir, name)
+    stem, ext = os.path.splitext(name)
+    n = 2
+    while os.path.exists(os.path.join(upload_dir, f"{stem} ({n}){ext}")):
+        n += 1
+    return os.path.join(upload_dir, f"{stem} ({n}){ext}")
+
+
 @app.route("/upload_reports", methods=["POST"])
 def upload_reports():
     files = request.files.getlist("report_files")
@@ -958,14 +1061,21 @@ def upload_reports():
     saved = []
     for f in files:
         name = sanitize_filename(f.filename)
-        f.save(os.path.join(upload_dir, name))
-        saved.append(name)
+        path = _unique_upload_path(upload_dir, name)
+        try:
+            f.save(path)
+        except OSError as e:
+            return jsonify({"error": safe_error(
+                f"{os.path.basename(path)} 保存失败，请缩短文件名后重试：{e}")}), 400
+        saved.append(os.path.basename(path))
     state["report_uploads"] = saved
     return jsonify({"ok": True, "count": len(saved), "filenames": saved})
 
 
 @app.route("/process_reports", methods=["POST"])
 def process_reports():
+    if not state.get("rubric_json"):
+        return jsonify({"error": "请先生成评分细则"}), 409
     if (state.get("grading_status") or {}).get("phase") == "running":
         return redirect("/app/results")
     if task_running():
@@ -1001,42 +1111,93 @@ def process_reports():
                 task_finish(t, "error", "uploads 目录中没有可处理的报告文件")
                 return
             task_update(t, total=total, stage="提取报告内容")
-            kept, dup = [], 0
+            kept, dup, failures, unidentified = [], 0, [], 0
+
+            def absorb(entry, fallback_name):
+                """提取结果并入 kept/failures：压缩包递归摊平，报告识别学生并去重。"""
+                nonlocal dup, unidentified
+                import shutil
+                status = entry.get("status")
+                name = os.path.basename(entry.get("file") or "") or fallback_name
+                if status == "archive":
+                    children = entry.get("extracted") or []
+                    if not children:
+                        failures.append({"filename": name,
+                                         "reason": "压缩包内没有可识别的报告文件"})
+                        # 包里没有任何可用报告：解包出来的非报告文件整目录清掉
+                        shutil.rmtree(os.path.join(reports_dir, os.path.splitext(name)[0]),
+                                      ignore_errors=True)
+                        _drop_failed_upload(entry.get("file"), upload_dir)
+                        return
+                    # 解包目录要留着：子报告的原件在里面，/report_original 靠它找到原文
+                    for child in children:
+                        absorb(child, name)
+                    return
+                if status == "ok":
+                    meta = entry["meta"]
+                    fn = meta["filename"]
+                    if fn in prev_students:
+                        meta["student"] = prev_students[fn]
+                    elif not meta.get("student"):
+                        task_update(t, stage="识别学生信息", detail=fn)
+                        meta["student"] = _extract_student(entry, fields, student_llm)
+                    _save_meta(entry)
+                    if not any((meta.get("student") or {}).values()):
+                        unidentified += 1
+                    digest = _text_hash(entry)
+                    if digest and fn not in prev_names and digest in seen_hashes:
+                        _discard_report(entry, upload_dir)
+                        dup += 1
+                        return
+                    if digest:
+                        seen_hashes.add(digest)
+                    kept.append(entry)
+                    return
+                if status in ("error", "skipped"):
+                    failures.append({"filename": name,
+                                     "reason": safe_error(entry.get("reason") or "解析失败")})
+                    _drop_empty_report_dir(reports_dir, name)
+                    _drop_failed_upload(entry.get("file"), upload_dir)
+                    return
+                kept.append(entry)
+
             for i, fp in enumerate(all_files):
                 if task_cancelled(t):
                     task_finish(t, "cancelled")
                     return
                 name = os.path.basename(fp)
                 task_update(t, progress=90 * i / max(total, 1), detail=name)
-                entry = extractor._process_single(fp)
-                if entry.get("status") == "ok":
-                    fn = entry["meta"]["filename"]
-                    if fn in prev_students:
-                        entry["meta"]["student"] = prev_students[fn]
-                    elif not entry["meta"].get("student"):
-                        task_update(t, stage="识别学生信息", detail=name)
-                        entry["meta"]["student"] = _extract_student(entry, fields, student_llm)
-                        _save_meta(entry)
-                    digest = _text_hash(entry)
-                    if digest and fn not in prev_names and digest in seen_hashes:
-                        _discard_report(entry, upload_dir)
-                        dup += 1
-                        task_update(t, done=i + 1)
-                        continue
-                    if digest:
-                        seen_hashes.add(digest)
-                kept.append(entry)
+                absorb(extractor._process_single(fp), name)
                 task_update(t, done=i + 1)
             if task_cancelled(t):
                 task_finish(t, "cancelled")
                 return
+            # 分批上传：本批只覆盖同名文件，其余已提取的报告保留（否则前一批从列表消失）
+            merged = list(prev)
+            position = {r["meta"]["filename"]: index for index, r in enumerate(merged)}
+            for entry in kept:
+                filename = (entry.get("meta") or {}).get("filename") or entry.get("filename") \
+                    or os.path.basename(entry.get("file") or "")
+                if filename in position:
+                    merged[position[filename]] = entry
+                else:
+                    position[filename] = len(merged)
+                    merged.append(entry)
+            ok_count = len([r for r in kept if r.get("status") == "ok"])
             # 已切走会话时不动新会话内存：提取物已落旧会话目录，切回时 hydrate 自磁盘重建
             if state.get("session") == sid:
-                state["extracted_reports"] = kept
+                state["extracted_reports"] = merged
+                state["report_failures"] = failures
                 state["report_uploads"] = []
-            detail = f"共 {len(kept)} 份" + (f"，自动去除 {dup} 份重复" if dup else "")
+            detail = f"成功 {ok_count} 份"
+            if failures:
+                detail += f"，失败 {len(failures)} 份（{failures[0]['reason']}）"
+            if dup:
+                detail += f"，自动去除 {dup} 份重复"
+            if unidentified:
+                detail += f"，{unidentified} 份未识别出学生信息"
             task_update(t, progress=100, stage="完成", detail=detail)
-            task_finish(t, "done")
+            task_finish(t, "error" if failures and not kept else "done", detail)
         except Exception as e:
             task_finish(t, "cancelled" if task_cancelled(t) else "error", e)
 
@@ -1047,6 +1208,26 @@ def process_reports():
 def _save_meta(entry):
     storage.write_json(os.path.join(entry["meta"]["output_dir"], "meta.json"),
                        entry["meta"], indent=2)
+
+
+def _drop_empty_report_dir(reports_dir, filename):
+    """解析失败后清掉提取器留下的空目录，免得 hydrate 时多一堆空报告。"""
+    path = os.path.join(reports_dir, os.path.splitext(filename)[0])
+    if os.path.isdir(path) and not os.listdir(path):
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+
+def _drop_failed_upload(source, upload_dir):
+    """解析失败的原件不会再被处理，别留在 uploads 里占地方（压缩包内的子文件随解包目录清掉）。"""
+    src = os.path.abspath(source or "")
+    if src.startswith(os.path.abspath(upload_dir)) and os.path.isfile(src):
+        try:
+            os.remove(src)
+        except OSError:
+            pass
 
 
 @app.route("/reports/delete/<path:filename>", methods=["POST"])
@@ -1074,7 +1255,7 @@ def reports_delete(filename):
         except OSError:
             pass
     state["extracted_reports"] = [r for r in state["extracted_reports"]
-                                  if r["meta"]["filename"] != filename]
+                                  if (r.get("meta") or {}).get("filename") != filename]
     state["report_uploads"] = [n for n in (state.get("report_uploads") or []) if n != filename]
     if grader is not None:
         _export_all()
@@ -1266,7 +1447,7 @@ def _classify_students(reports=None, roster=None):
     name_key = next((h for h in roster["headers"] if "姓名" in h and h != key), None)
     suspicious, matched = [], []
     for filename, student in students.items():
-        value = str(student.get(key, "") or "").strip()
+        value = student_value(student, key)
         if not value:
             suspicious.append({"report_id": filename, "student": student, "reason": "未提取到学生信息"})
         elif value not in values:
@@ -1275,7 +1456,7 @@ def _classify_students(reports=None, roster=None):
         else:
             if name_key:
                 roster_name = str(values[value].get(name_key, "") or "").strip()
-                report_name = str(student.get(name_key, "") or "").strip()
+                report_name = student_value(student, name_key)
                 if roster_name and report_name and roster_name != report_name:
                     suspicious.append({"report_id": filename, "student": student,
                                        "reason": f"{key}匹配但{name_key}不一致（名册：{roster_name}）"})
@@ -1316,7 +1497,7 @@ def _export_flagged(suspicious, roster=None, grading_dir=None):
     ws.title = "被标记人员"
     ws.append(cols + ["报告ID", "标记原因"])
     for s in suspicious:
-        ws.append([(s["student"] or {}).get(c, "") for c in cols] + [s["report_id"], s["reason"]])
+        ws.append([student_value(s["student"], c) for c in cols] + [s["report_id"], s["reason"]])
     wb.save(path)
 
 
@@ -1428,10 +1609,14 @@ def mcp_refresh():
 
 
 # ---------------------------------------------------------------- 评分
-def _image_entries(entry):
-    """图片 → 归维度用的条目。默认用图片上下文；开启 grading.ocr_images 才 OCR（结果缓存）。"""
+def _image_entries(entry, config):
+    """图片 → 归维度用的条目。默认用图片上下文；开启 grading.ocr_images 才 OCR（结果缓存）。
+
+    config 由请求线程快照传入：工作线程绝不读 state["config"]，否则切课时会拿到别门课的配置。
+    """
     from .utils.ocr_engine import OCREngine
-    enabled = bool((state["config"] or {}).get("grading", {}).get("ocr_images", False))
+    config = config or {}
+    enabled = bool(config.get("grading", {}).get("ocr_images", False))
     report_dir = entry["meta"]["output_dir"]
     cache_dir = os.path.join(report_dir, ".ocr")
     os.makedirs(cache_dir, exist_ok=True)
@@ -1449,7 +1634,7 @@ def _image_entries(entry):
             text = ""
             if engine is None or engine is False:
                 try:
-                    engine = OCREngine.get((state["config"] or {}).get("ocr", {}))
+                    engine = OCREngine.get(config.get("ocr", {}))
                 except Exception:
                     engine = False
             if engine:
@@ -1466,7 +1651,7 @@ def _image_descriptions(entries):
     return "\n".join(f"- 图 {e['id']}：{e['text'][:200]}" for e in entries[:20]) or ""
 
 
-def _grade_one(grader, entry, references="", corrections=None):
+def _grade_one(grader, entry, references="", corrections=None, config_snapshot=None):
     from .web import usage as usage_store
 
     text = _report_text(entry)
@@ -1479,16 +1664,24 @@ def _grade_one(grader, entry, references="", corrections=None):
     usage_store.set_report(filename)
     try:
         images = entry.get("images") or []
-        image_entries = _image_entries(entry)
+        image_entries = _image_entries(entry, config_snapshot)
         chunks = _chunks(text)
         chunk_entries = [{"id": f"p{i}", "text": c[:300]} for i, c in enumerate(chunks)]
+        previous = next((r for r in grader.results if r.get("report_id") == filename), None)
         correction_text = corrections.get(filename)
-        grade_text = text + (f"\n\n[教师修改意见，本次重评须重点回应] {correction_text}"
-                             if correction_text else "")
+        # 上一轮的逐维度教师说明也要进重评提示词，否则老师写的理由只是存起来没人看
+        notes = [f"{name}：{d.get('teacher_reasoning')}"
+                 for name, d in (((previous or {}).get("grading") or {}).get("scores") or {}).items()
+                 if isinstance(d, dict) and d.get("teacher_reasoning")]
+        extra = "".join([
+            f"\n\n[教师修改意见，本次重评须重点回应] {correction_text}" if correction_text else "",
+            "\n\n[上一轮教师批注，本次重评须参考] " + "；".join(notes) if notes else "",
+        ])
+        # 检测/查重/判级正文一律只用学生原文；教师意见单独作为高优先级段落，避免被当成提示注入
+        grade_text = text
 
         # 重评且正文、维度名都没变：归类结果可复用，省掉一次模型调用
         criterion_names = {c["name"] for c in grader.rubric.get("criteria", [])}
-        previous = next((r for r in grader.results if r.get("report_id") == filename), None)
         reusable = False
         if previous and previous.get("_report_text") == text:
             prior_text = previous.get("text_assignments") or {}
@@ -1511,7 +1704,7 @@ def _grade_one(grader, entry, references="", corrections=None):
             try:
                 return grader.grade_single(
                     filename, grade_text, image_descriptions=_image_descriptions(image_entries),
-                    references=references)
+                    references=references, teacher_notes=extra)
             finally:
                 usage_store.set_report(None)
 
@@ -1560,7 +1753,7 @@ def _grading_workers():
     return clamp((state.get("config") or {}).get("grading", {}).get("workers")) or 3
 
 
-def _grade_targets(grader, targets, references, status, corrections=None):
+def _grade_targets(grader, targets, references, status, corrections=None, config_snapshot=None):
     """按报告并行；并发数受 ERG_GRADING_WORKERS 限制，取消后不再派新任务。"""
     workers = _grading_workers()
     if workers <= 1 or len(targets) <= 1:
@@ -1569,7 +1762,7 @@ def _grade_targets(grader, targets, references, status, corrections=None):
                 return
             status["current"] = entry["meta"]["filename"]
             try:
-                _grade_one(grader, entry, references, corrections)
+                _grade_one(grader, entry, references, corrections, config_snapshot)
             except Exception as e:  # 单份失败不拖垮整轮
                 grader.record_failure(entry["meta"]["filename"], e)
             status["done"] = status.get("done", 0) + 1
@@ -1584,7 +1777,7 @@ def _grade_targets(grader, targets, references, status, corrections=None):
             entry = next(queue)
         except StopIteration:
             return
-        pending[pool.submit(_grade_one, grader, entry, references, corrections)] = entry
+        pending[pool.submit(_grade_one, grader, entry, references, corrections, config_snapshot)] = entry
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="grade") as pool:
         for _ in range(min(workers, len(targets))):
@@ -1608,6 +1801,7 @@ def _spawn_grading(sid, grader, targets, corrections, reports, roster,
     status dict（登记在 RUNNING_STATUS[sid]），绝不读写 state 里的其他会话数据。"""
     status = {"phase": "running", "done": 0, "total": len(targets), "current": "",
               "cancel": False, "message": "", "workers": _grading_workers()}
+    config_snapshot = dict(state.get("config") or {})  # 请求线程内捕获，工作线程不读 state
     RUNNING_STATUS[sid] = status
     if state.get("session") == sid:
         state["grading_status"] = status
@@ -1621,7 +1815,7 @@ def _spawn_grading(sid, grader, targets, corrections, reports, roster,
                 mount=mount, sid=sid)
             if state.get("session") == sid:
                 state["mcp_refs"] = references
-            _grade_targets(grader, targets, references, status, corrections)
+            _grade_targets(grader, targets, references, status, corrections, config_snapshot)
             grader.export_results()
             _export_all(grader=grader, reports=reports, roster=roster,
                         external=external, rubric=rubric_json)
@@ -1645,10 +1839,10 @@ def _student_group(entry, roster):
     student = entry["meta"].get("student") or {}
     if roster:
         key = _roster_key(roster)
-        value = str(student.get(key, "") or "").strip()
+        value = student_value(student, key)
         if value:
             name_key = next((h for h in roster["headers"] if "姓名" in h and h != key), None)
-            name = str(student.get(name_key, "") or "").strip() if name_key else ""
+            name = student_value(student, name_key) if name_key else ""
             return value, f"{name}（{value}）" if name else value
     sid = str(student.get("学号", "") or "").strip()
     name = str(student.get("姓名", "") or "").strip()
@@ -1690,9 +1884,8 @@ def _select_context(error=None):
         if n != len(candidates):
             hint += f" · 差 {abs(n - len(candidates))} 人，详见「花名册」页"
     statuses = {r["report_id"]: r for r in (state["grader"].results if state["grader"] else [])}
-    stale_ids = {rid for rid, r in statuses.items() if _result_stale(r)}
     return {"reports": candidates, "graded_ids": graded, "statuses": statuses,
-            "stale_ids": stale_ids, "groups": [groups[g] for g in order],
+            "groups": [groups[g] for g in order],
             "hint": hint, "error": error,
             "has_rubric": bool(state.get("rubric_json") or state.get("rubric")),
             "rubric_confirmed": _rubric_confirmed()}
@@ -1832,9 +2025,13 @@ def update_scores():
     if (state.get("grading_status") or {}).get("phase") == "running":
         return jsonify({"error": "评分进行中，暂不能修改"}), 400
     report_id = request.form.get("report_id")
-    for result in state["grader"].results:
-        if result["report_id"] == report_id:
-            _apply_teacher_levels(result, request.form, "level::", "reason::")
+    result = next((r for r in state["grader"].results if r["report_id"] == report_id), None)
+    if result is not None:
+        if report_id in _approved_ids():
+            return jsonify({"error": "已终审的报告请打回重评后再修改"}), 400
+        if _result_stale(result):
+            return jsonify({"error": "评分结果已过期，请重新评分后再修改"}), 409
+        _apply_teacher_levels(result, request.form, "level::", "reason::")
     _export_all()
     return redirect(request.form.get("next") or "/app/results")
 
@@ -1863,6 +2060,32 @@ def approve_report(filename):
     save_approved(state["approved_ids"])
     _export_all()
     return redirect(request.form.get("next") or "/app/results")
+
+
+@app.route("/report/<path:filename>/clear_flag", methods=["POST"])
+def clear_flag(filename):
+    """人工放行异常结果：记一条豁免，移除该异常结果使其回到「未评分」队列，教师随后重评即可。"""
+    grader = state["grader"]
+    if not grader:
+        return jsonify({"error": "尚无评分结果"}), 400
+    result = next((r for r in grader.results if r["report_id"] == filename), None)
+    if not result:
+        return jsonify({"error": "报告不存在或已放行"}), 404
+    if result.get("status") == "graded" or result.get("status") not in TERMINAL_STATUSES:
+        return jsonify({"error": "只有异常状态（非已评分）的报告才需要人工放行"}), 400
+    payload = request.get_json(silent=True) or {}
+    reason = str(payload.get("reason") or request.form.get("reason", "")).strip()
+    overrides = state.setdefault("overrides", {})
+    overrides[filename] = {"at": time.time(), "by": "teacher",
+                           "reason": reason, "from_status": result.get("status")}
+    storage.write_json(os.path.join(session_dir(), "overrides.json"), overrides)
+    grader.results = [r for r in grader.results if r["report_id"] != filename]
+    state["approved_ids"] = _approved_ids() - {filename}
+    save_approved(state["approved_ids"])
+    _export_all()
+    return jsonify({"ok": True, "cleared": filename,
+                    "message": "已放行，该报告回到待评队列，请重新评分" +
+                               ("" if reason else "（未填理由）")})
 
 
 # ---------------------------------------------------------------- 配置
@@ -1899,6 +2122,15 @@ def settings():
     if request.method == "GET":
         return redirect("/app/settings")
     form = request.form
+    raw_max_tokens = (form.get("max_tokens") or "").strip()
+    max_tokens = (llm_cfg.get("openai") or {}).get("max_tokens") or 2048
+    if raw_max_tokens:
+        try:
+            max_tokens = int(raw_max_tokens)
+        except ValueError:
+            return jsonify({"error": "单次输出上限需在 256–16384 之间的整数"}), 400
+        if not 256 <= max_tokens <= 16384:
+            return jsonify({"error": "单次输出上限需在 256–16384 之间"}), 400
     backend = form.get("llm_backend", llm_cfg.get("backend", "openai"))
     if backend in BACKENDS:
         llm_cfg["backend"] = backend
@@ -1915,7 +2147,7 @@ def settings():
     openai["model"] = form.get("model", openai.get("model", ""))
     if form.get("api_key", "").strip():
         openai["api_key"] = form["api_key"].strip()
-    openai["max_tokens"] = _int_or(form.get("max_tokens"), openai.get("max_tokens") or 2048)
+    openai["max_tokens"] = max_tokens
     ocr = cfg.setdefault("ocr", {})
     ocr["backend"] = form.get("ocr_backend", ocr.get("backend", "paddleocr"))
     api = ocr.setdefault("api", {})
@@ -2048,27 +2280,29 @@ def download(filename):
 # 这里只补页面数据接口与需要结构化结果的接口，避免两套业务逻辑。
 
 def _api_criteria_uploaded(names):
-    return any(os.path.splitext(n)[1].lower() in (".docx", ".pdf", ".txt")
-               and not n.startswith("calibration_") for n in names)
+    return any(n.startswith("criteria_")
+               and os.path.splitext(n)[1].lower() in (".docx", ".pdf", ".txt") for n in names)
 
 
-@app.route("/")
-def spa_home():
+def _spa_index():
+    """SPA 外壳：顺手把 CSRF 令牌注入一次，前端所有 POST 都带上它。"""
     index = os.path.join(UI_DIST, "index.html")
     if not os.path.exists(index):
         return ("前端尚未构建：请执行 cd frontend && npm install && npm run build", 503,
                 {"Content-Type": "text/plain; charset=utf-8"})
-    return send_file(index)
+    html = storage.read_text(index)
+    return html.replace("<head>", f'<head><meta name="csrf-token" content="{CSRF_TOKEN}">', 1)
+
+
+@app.route("/")
+def spa_home():
+    return _spa_index()
 
 
 @app.route("/app")
 @app.route("/app/<path:sub>")
 def spa(sub=None):
-    index = os.path.join(UI_DIST, "index.html")
-    if not os.path.exists(index):
-        return ("前端尚未构建：请执行 cd frontend && npm install && npm run build", 503,
-                {"Content-Type": "text/plain; charset=utf-8"})
-    return send_file(index)
+    return _spa_index()
 
 
 @app.route("/favicon.ico")
@@ -2268,26 +2502,35 @@ def api_reports():
             "approved": meta["filename"] in approved,
             "hasOriginal": _origin_path(meta["filename"]) is not None,
         })
-    return jsonify({"reports": rows, "fields": _student_fields(), "downloads": _download_paths()})
+    return jsonify({"reports": rows, "fields": _student_fields(), "downloads": _download_paths(),
+                    "failures": state.get("report_failures") or []})
 
 
 @app.route("/api/report/<path:filename>")
 def api_report(filename):
-    _apply_external()
     entry = _find_entry(filename)
     if not entry or entry.get("status") != "ok":
         return jsonify({"error": "报告不存在"}), 404
     text = _report_text(entry)
     result = next((r for r in (state["grader"].results if state["grader"] else [])
                    if r["report_id"] == filename), None)
-    blocks = _build_dim_blocks(state.get("rubric_json") or _coerce_rubric(state.get("rubric") or ""),
-                               text, result, entry.get("images") or ())
+    failure = None
+    if result and result.get("status") != "graded":
+        reason = (result.get("error")
+                  or (result.get("injection_details") or {}).get("evidence")
+                  or (result.get("safety_details") or {}).get("evidence") or "")
+        failure = {"status": result.get("status"), "reason": reason}
+        blocks = []
+    else:
+        blocks = _build_dim_blocks(state.get("rubric_json") or _coerce_rubric(state.get("rubric") or ""),
+                                   text, result, entry.get("images") or ())
     return jsonify({
         "filename": filename,
         "student": entry["meta"].get("student") or {},
         "fields": _student_fields(),
         "blocks": blocks,
         "result": result,
+        "failure": failure,
         "hasOriginal": _origin_path(filename) is not None,
     })
 
@@ -2304,7 +2547,6 @@ def api_select():
                                  "images": r["meta"].get("image_count") or 0,
                                  "scanned": bool(r["meta"].get("is_scanned")),
                                  "graded": r["meta"]["filename"] in ctx["graded_ids"],
-                                 "stale": r["meta"]["filename"] in ctx["stale_ids"],
                                  "status": (ctx["statuses"].get(r["meta"]["filename"]) or {}).get("status", "")}
                                 for r in g["reports"]]} for g in ctx["groups"]],
         "hint": ctx["hint"],
@@ -2317,7 +2559,6 @@ def api_select():
 
 @app.route("/api/results")
 def api_results():
-    _apply_external()
     results = state["grader"].results if state["grader"] else []
     approved = _approved_ids()
     running = (state.get("grading_status") or {}).get("phase") == "running"
@@ -2330,14 +2571,18 @@ def api_results():
         "failed": len([r for r in results if r.get("status") in ("llm_failed", "detection_failed",
                                                                  "audit_truncated")]),
         "plagiarism": len([r for r in results if r.get("similarity_warnings")]),
+        "duplicate": len([r for r in results if r.get("status") == "flagged_duplicate"]),
+        "safety_failed": len([r for r in results if r.get("safety_detection_failed")]),
+        "manual_overrides": len(state.get("overrides") or {}),
         "unapproved": len([r for r in results if r["report_id"] not in approved]),
     }
     return jsonify({
-        "results": results,
+        # 正文与分段只走 /api/report/<id>：列表接口在评分期间被轮询，不能带上全文
+        "results": [{k: v for k, v in r.items() if not k.startswith("_report")} for r in results],
         "counts": counts,
+        "weights": rubric_io.rubric_weights(state.get("rubric_json") or {}),
         "approvedIds": sorted(approved),
         "students": students,
-        "staleIds": [r["report_id"] for r in results if _result_stale(r)],
         "running": running,
         "downloads": _download_paths(),
         "agreement": _agreement(),
@@ -2353,6 +2598,7 @@ def api_roster():
     _students, suspicious, missing = _classify_students()
     return jsonify({
         "roster": roster,
+        "fields": _student_fields(),
         "reportCount": len([r for r in state["extracted_reports"] if r.get("status") == "ok"]),
         "suspicious": suspicious,
         "missing": missing,

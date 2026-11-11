@@ -48,16 +48,50 @@ def extract_archive(filepath, dest_dir):
     os.makedirs(dest_dir, exist_ok=True)
     if fmt == "zip":
         with ZipFile(filepath, "r") as zf:
+            entries = [(i.filename, i.file_size, i.is_dir()) for i in zf.infolist()]
+            _check_archive(dest_dir, entries)
             zf.extractall(dest_dir)
     elif fmt == "rar":
         import rarfile
         with rarfile.RarFile(filepath, "r") as rf:
+            entries = [(i.filename, i.file_size, i.isdir()) for i in rf.infolist()]
+            _check_archive(dest_dir, entries)
             rf.extractall(dest_dir)
     elif fmt == "7z":
         import py7zr
         with py7zr.SevenZipFile(filepath, "r") as sz:
+            entries = [(f.filename, f.uncompressed, f.is_directory) for f in sz.list()]
+            _check_archive(dest_dir, entries)
             sz.extractall(dest_dir)
     return dest_dir
+
+
+# 解压上限：既防 zip bomb 打满磁盘，也防一个压缩包换来不可估量的模型调用费用
+ARCHIVE_MAX_ENTRIES = 2000
+ARCHIVE_MAX_FILE_BYTES = 200 * 1024 * 1024
+ARCHIVE_MAX_TOTAL_BYTES = 500 * 1024 * 1024
+
+
+def _check_archive(dest_dir, entries):
+    """解压前按清单校验条目数/体积/路径；超限抛 ValueError，由调用方计入失败清单。"""
+    root = os.path.realpath(dest_dir)
+    files = [(name, size or 0) for name, size, is_dir in entries if not is_dir]
+    if len(files) > ARCHIVE_MAX_ENTRIES:
+        raise ValueError(f"压缩包含 {len(files)} 个文件，超过上限 {ARCHIVE_MAX_ENTRIES}")
+    total = sum(size for _, size in files)
+    if total > ARCHIVE_MAX_TOTAL_BYTES:
+        raise ValueError(
+            f"压缩包解压后约 {total // 1048576}MB，超过上限 {ARCHIVE_MAX_TOTAL_BYTES // 1048576}MB")
+    biggest = max(files, key=lambda item: item[1], default=None)
+    if biggest and biggest[1] > ARCHIVE_MAX_FILE_BYTES:
+        raise ValueError(
+            f"压缩包内 {biggest[0]} 解压后约 {biggest[1] // 1048576}MB，"
+            f"超过单文件上限 {ARCHIVE_MAX_FILE_BYTES // 1048576}MB")
+    for name, _size in files:
+        target = os.path.realpath(os.path.join(root, str(name).replace("\\", "/")))
+        # 绝对路径或 ../ 会让 realpath 跳出 dest_dir；commonpath 跨盘符时自己抛 ValueError
+        if os.path.commonpath([root, target]) != root:
+            raise ValueError(f"压缩包内含越界路径：{name}")
 
 
 def extract_pdf(filepath, output_dir, ocr_engine=None):

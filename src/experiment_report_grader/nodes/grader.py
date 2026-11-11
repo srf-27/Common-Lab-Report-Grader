@@ -13,6 +13,7 @@ from ..utils import calc_tools
 from ..utils.content_safety import check_content_safety
 from ..utils.injection_detector import detect_injection
 from ..utils.privacy import anonymize_text
+from ..utils.student_fields import student_value
 from .rubric_io import LEVEL_POINTS, LEVELS, compute_subtotals, match_criterion
 
 class BeltLlm:
@@ -62,7 +63,7 @@ GRADING_USER = """## 评分维度
 ## 报告图片说明
 {image_descriptions}
 
-按系统消息里的规则与 JSON 结构输出。"""
+{teacher_notes_block}按系统消息里的规则与 JSON 结构输出。"""
 
 
 def _parse_json(text):
@@ -147,6 +148,7 @@ class Grader:
                 self.tool_executor = calc_tools.dispatch
         self.similarity_threshold = grading_cfg.get("similarity_threshold", 0.92)
         self.similarity_reject = grading_cfg.get("similarity_reject", 0.97)
+        self.max_prompt_chars = grading_cfg.get("max_prompt_chars", 8000)
         self.dimension_collections = {}
         self.remembered = None
         self._checks_cache = None
@@ -277,11 +279,14 @@ class Grader:
         collection = self._dimension_collection(name, create=False)
         if collection is None:
             return ""
-        with self._kb_lock:
-            total = collection.count()
-            if total == 0 or not text.strip():
-                return ""
-            hits = self._query_collection(collection, text, min(n_results, total))
+        try:
+            with self._kb_lock:
+                total = collection.count()
+                if total == 0 or not text.strip():
+                    return ""
+                hits = self._query_collection(collection, text, min(n_results, total))
+        except Exception:
+            return ""  # 向量库抖动只损失提示词里的历史片段，不该让整份报告评不出来
         return "\n".join(
             f"- （相似度 {1 - distance:.2f}，历史等级 {meta.get('level') or '未定'}）{doc[:200]}"
             for doc, meta, distance in zip(hits["documents"][0], hits["metadatas"][0],
@@ -337,18 +342,22 @@ class Grader:
 
     def _exemplar_shots(self, query_text, n_cases=2, max_chars=1200):
         """取 1-2 份得分最高的已终审报告（正文节选 + 其各维度判定）作为提示词 shots。"""
-        with self._kb_lock:
-            total = self.kb.count()
-            if total == 0 or not query_text.strip():
-                return ""
-            hits = self._query_collection(self.kb.collection, query_text, min(total, 5))
+        try:
+            with self._kb_lock:
+                total = self.kb.count()
+                if total == 0 or not query_text.strip():
+                    return ""
+                hits = self._query_collection(self.kb.collection, query_text, min(total, 5))
+        except Exception:
+            return ""  # 同上：范例只是提示词增强，向量库读失败不该中断评分
         cases = []
         for document, metadata in zip(hits["documents"][0], hits["metadatas"][0]):
             grading = _parse_json((metadata or {}).get("grading_json") or "")
             scores = grading.get("scores") or {}
             if not scores:
                 continue
-            points = sum(LEVEL_POINTS.get((entry or {}).get("level"), 0) for entry in scores.values())
+            # 与老师看到的总分同口径：按权重折算，低权重维度刷满 A 压不过高权重维度
+            points = compute_subtotals(scores, self.rubric)["total"]
             cases.append((points, document, scores))
         cases.sort(key=lambda case: case[0], reverse=True)
         shots = []
@@ -510,7 +519,7 @@ class Grader:
         return result
 
     # ---------- 单份评分 ----------
-    def grade_single(self, report_id, text, image_descriptions=None, references=""):
+    def grade_single(self, report_id, text, image_descriptions=None, references="", teacher_notes=""):
         # 注入与内容安全互不依赖：并行发，正常报告少一次模型往返
         if self.parallel_checks:
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="check") as pool:
@@ -536,17 +545,40 @@ class Grader:
             return self._finish({"report_id": report_id, "status": "blocked_safety",
                                  "safety_details": safety, "graded_at": time.time()}, False)
 
-        similarity_warnings = self._check_similarity(report_id, text)
-        self._remember_report(report_id, text)
+        # 向量库读/写失败不能把已花钱的判级作废，但也不能装作查过重：降级 + 写进复核提示
+        kb_notes = []
+        if safety.get("detection_failed"):
+            kb_notes.append("内容安全检测失败，请人工复核")
+        try:
+            similarity_warnings = self._check_similarity(report_id, text)
+        except Exception as e:
+            similarity_warnings = []
+            kb_notes.append(f"查重未完成（向量库读取失败：{str(e)[:80]}），请人工复核相似度")
+        # 达到 reject 阈值＝判定重复：不评分、不写查重库，转人工队列（flagged_duplicate 属终态）
+        if any(w.get("level") == "rejected" for w in similarity_warnings):
+            return self._finish({"report_id": report_id, "status": "flagged_duplicate",
+                                 "similarity_warnings": similarity_warnings,
+                                 "graded_at": time.time()}, False)
+        try:
+            self._remember_report(report_id, text)
+        except Exception as e:
+            kb_notes.append(f"未写入查重库（{str(e)[:80]}），后续报告查不到这一份")
         # 系统消息与维度块在同一门课内完全一致：稳定前缀越长，供应商的前缀缓存命中越多
         semantic = [c for c in self.rubric.get("criteria", []) if not c.get("excluded")]
+        truncated = None
+        if len(text) > self.max_prompt_chars:
+            truncated = {"prompt_chars": self.max_prompt_chars, "total_chars": len(text)}
+            kb_notes.append(f"正文已截断，判级仅使用前 {self.max_prompt_chars} 字，请人工复核结论部分")
+        teacher_block = (f"### 教师修改意见（高优先级，须重点回应）\n{str(teacher_notes).strip()}\n\n"
+                         if str(teacher_notes or "").strip() else "")
         user_prompt = GRADING_USER.format(
             criteria_block=self._criteria_block(semantic),
             dimension_notes=self._dimension_notes(semantic, text),
             exemplar_shots=self._exemplar_shots(text) or "（暂无已终审范例）",
             references=references or "（无插件参考）",
-            report_text=text[:8000],
+            report_text=text[:self.max_prompt_chars],
             image_descriptions=image_descriptions or "（本报告无图片）",
+            teacher_notes_block=teacher_block,
         )
         try:
             grading = _parse_json(self.llm.chat(
@@ -564,9 +596,15 @@ class Grader:
 
         grading["scores"] = self._normalize_scores(grading["scores"], semantic, {})
         grading["subtotals"] = compute_subtotals(grading["scores"], self.rubric)
+        if kb_notes:
+            grading["flags"] = list(grading.get("flags") or []) + kb_notes
         result = {"report_id": report_id, "status": "graded", "grading": grading,
                   "graded_at": time.time(), "similarity_warnings": similarity_warnings,
                   "safety_warnings": safety.get("warned", [])}
+        if truncated:
+            result["truncated"] = truncated
+        if safety.get("detection_failed"):
+            result["safety_detection_failed"] = True
         return self._finish(result, True)
 
     def _normalize_scores(self, raw_scores, semantic, mechanical):
@@ -626,7 +664,7 @@ class Grader:
         path = os.path.join(self.output_dir, "grading_summary.xlsx")
         students = students or {}
         stu_cols = (roster or {}).get("headers") or ["班级", "学院", "学号", "姓名"]
-        dims = [(c.get("name", ""), float(c.get("weight") or 0))
+        dims = [(c.get("name", ""), float(c.get("weight") or 0), bool(c.get("excluded")))
                 for c in (self.rubric or {}).get("criteria", []) if c.get("name")]
         if not dims:
             seen = []
@@ -634,38 +672,47 @@ class Grader:
                 for k in ((r.get("grading") or {}).get("scores") or {}):
                     if k not in seen:
                         seen.append(k)
-            dims = [(k, 0.0) for k in seen]
+            dims = [(k, 0.0, False) for k in seen]
+        active_all = sum(w for _, w, ex in dims if not ex) or sum(w for _, w, _ in dims) or 100.0
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "评分汇总"
-        dim_cols = [f"{name}({w:g}%)" for name, w in dims]
-        ws.append(stu_cols + ["报告ID", "状态", "程序化小计", "语义小计", "总分"] + dim_cols)
+        dim_cols = [f"{name}(不计分)" if ex else f"{name}({100.0 * w / active_all:g}%)"
+                    for name, w, ex in dims]
+        ws.append(stu_cols + ["报告ID", "状态", "语义小计", "总分",
+                              "总评", "复核提示", "教师说明"] + dim_cols)
         for r in self.results:
-            row = [students.get(r["report_id"], {}).get(c, "") for c in stu_cols]
+            row = [student_value(students.get(r["report_id"]), c) for c in stu_cols]
             row += [r["report_id"], r["status"]]
             if r["status"] == "graded" and r.get("grading"):
                 subtotals = r["grading"].get("subtotals", {})
-                row += [subtotals.get("procedural", ""), subtotals.get("semantic", ""),
-                        subtotals.get("total", "")]
+                row += [subtotals.get("semantic", ""), subtotals.get("total", "")]
                 scores = r["grading"].get("scores", {})
-                for name, weight in dims:
+                row += [r["grading"].get("summary", ""),
+                        "；".join(str(f) for f in (r["grading"].get("flags") or [])),
+                        "；".join(f"{n}：{d['teacher_reasoning']}" for n, d in scores.items()
+                                  if isinstance(d, dict) and d.get("teacher_reasoning"))]
+                # 与 compute_subtotals 同口径：只按本行实际有分的维度折算，单元格之和=总分
+                active = sum(w for name, w, _ in dims if name in scores) or active_all
+                for name, weight, _ex in dims:
                     entry = scores.get(name) or {}
                     level = entry.get("level")
+                    share = 100.0 * weight / active
                     if level in LEVEL_POINTS:
-                        row.append(f"{level} {round(LEVEL_POINTS[level] * weight / 100.0, 1):g}/{weight:g}")
+                        row.append(f"{level} {round(LEVEL_POINTS[level] * weight / active, 1):g}/{share:g}")
                     elif entry.get("score") is not None:
                         score = float(entry["score"])
-                        row.append(f"{score:g} {round(score * weight / 100.0, 1):g}/{weight:g}")
+                        row.append(f"{score:g} {round(score * weight / active, 1):g}/{share:g}")
                     else:
                         row.append("")
             else:
-                row += ["", "", "", "N/A"] + [""] * len(dim_cols)
+                row += ["", "N/A", "", "", ""] + [""] * len(dim_cols)
             ws.append(row)
         if suspicious:
             sheet = wb.create_sheet("可疑人员")
             sheet.append(stu_cols + ["报告ID", "可疑原因"])
             for s in suspicious:
-                sheet.append([s["student"].get(c, "") for c in stu_cols] + [s["report_id"], s["reason"]])
+                sheet.append([student_value(s["student"], c) for c in stu_cols] + [s["report_id"], s["reason"]])
         if missing:
             sheet = wb.create_sheet("缺交名单")
             sheet.append(stu_cols)
