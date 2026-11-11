@@ -23,16 +23,12 @@ ocr:
     api_model: "glm-4v-flash"
 
 grading:
-  batch_size: 1
   similarity_threshold: 0.92
   similarity_reject: 0.97
-
-rubric_iteration:
-  max_iterations: 2
-  alert_mismatch_rate: 0.5
+  max_prompt_chars: 8000
+  max_display_chunks: 30
 
 extraction:
-  image_context_lines: 2
   markitdown_fallback: true  # 本地解析不支持/失败时（html/pptx/xlsx/epub 等）经 markitdown MCP 插件转 Markdown；插件缺席则保持原行为
 
 safety:

@@ -17,17 +17,14 @@ STRUCT_RUBRIC_PROMPT = """你是评估设计专家。依据评分标准文档生
    等级 A/B/C/D/E，E = 该维度内容未实现/缺失或严重不合格（未做、整卷跑题、抄袭、白卷），不是"比 D 更差"
 4. 报告里通常看不到证据的维度（预习、课堂、考勤、纪律、操作过程、自评、团队合作）标 "non_report": true，其余 false。
    这些维度按大纲原样单列即可，不要与报告维度合并，也不要因为"报告里没有"就不输出。
-6. rules 仅支持两种：
-   {{"type": "exists", "pattern": "正则"}}
-   {{"type": "numeric_compare", "pattern": "含捕获组的正则", "op": "<|<=|>|>=|==", "threshold": 数值}}
-7. 先识别实验主题（实验名称、被测参量、核心方法与仪器），各级判据必须显式绑定这些主题要素，禁止模板句。
+6. 先识别实验主题（实验名称、被测参量、核心方法与仪器），各级判据必须显式绑定这些主题要素，禁止模板句。
    学科不限：物理、化学、生物、电子、机械、计算机等实验课一律适用
-8. 每个维度的判据必须含防跑题条款：报告内容与本实验主题无关时，该维度不得高于 D 级
+7. 每个维度的判据必须含防跑题条款：报告内容与本实验主题无关时，该维度不得高于 D 级
 
 ## 输出（不要代码围栏）
 {{"criteria": [
   {{"name": "...", "weight": 10, "non_report": false, "doc_ref": "文档章节名",
-    "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}, "rules": null}}
+    "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}}}
 ]}}"""
 
 STRUCT_PAIR_PROMPT = """你是评估设计专家。给你两份材料，请只为「本次实验的实验报告」生成结构化评分细则（JSON）。
@@ -50,7 +47,7 @@ STRUCT_PAIR_PROMPT = """你是评估设计专家。给你两份材料，请只�
 9. 只输出 JSON，不要代码围栏：
 {{"criteria": [{{"name": "...", "weight": 20, "non_report": false,
   "doc_ref": "大纲章节；实验步骤",
-  "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}, "rules": null}}],
+  "levels": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}}}],
  "ignored": [{{"name": "...", "reason": "..."}}]}}"""
 
 CELL_PROMPT = """你是评估设计专家。依据评分标准文档，只为维度「{name}」补全下列空缺字段，其余内容不要改写。
@@ -145,7 +142,7 @@ class RubricGenerator:
         if not valid:
             raise ValueError("模型未生成带标准文档位置（doc_ref）的维度，请重试或更换模型")
         criteria = [new_criterion(c.get("name", ""), c.get("weight", 0), c.get("mechanical", False),
-                                  c.get("doc_ref", ""), c.get("levels"), c.get("rules"),
+                                  c.get("doc_ref", ""), c.get("levels"),
                                   non_report=c.get("non_report", False))
                     for c in valid]
         warnings = []
@@ -215,7 +212,7 @@ class RubricGenerator:
         return filled
 
     def generate_cells(self, criteria_doc, name, context, fields):
-        maybe = {"name": name, "weight": 0, "doc_ref": "", "levels": {}, "rules": None}
+        maybe = {"name": name, "weight": 0, "doc_ref": "", "levels": {}}
         prompt = CELL_PROMPT.format(
             doc=criteria_doc, name=name,
             context=json.dumps({**maybe, **(context or {})}, ensure_ascii=False),
@@ -241,7 +238,7 @@ class RubricGenerator:
         return data.get("warnings", [])
 
     def calibrate(self, rubric, report_text, teacher_grading, ai_grading):
-        return _ask(CALIBRATION_PROMPT.format(
+        return self._ask(CALIBRATION_PROMPT.format(
             rubric=rubric, report_text=report_text[:8000],
             teacher_grading=json.dumps(teacher_grading, ensure_ascii=False),
             ai_grading=json.dumps(ai_grading, ensure_ascii=False)))

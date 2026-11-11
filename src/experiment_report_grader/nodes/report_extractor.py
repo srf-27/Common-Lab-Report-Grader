@@ -2,6 +2,7 @@ import os
 import pathlib
 from datetime import datetime
 from .. import storage
+from ..utils.safe_error import safe_error
 from ..utils.file_parser import (
     detect_archive_type, extract_archive, extract_pdf, extract_docx, extract_markdown,
     extract_doc, collect_report_files, MARKITDOWN_EXTENSIONS
@@ -77,7 +78,7 @@ class ReportExtractor:
                 return {"status": "skipped", "file": filepath,
                         "reason": f"Unsupported format: {ext}"}
         except Exception as e:
-            local_error = str(e)
+            local_error = safe_error(e)
 
         if meta is None:
             # 本地不支持或失败：markitdown MCP 兜底；不可用时按原行为返回 skipped/error

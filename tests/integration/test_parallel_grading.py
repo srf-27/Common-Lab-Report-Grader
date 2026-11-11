@@ -18,7 +18,7 @@ from docx import Document
 import experiment_report_grader.app as app_mod
 from experiment_report_grader.app import app, state
 from experiment_report_grader.web import state as state_mod
-from fake_llm import CRITERIA, FakeLLM
+from real_llm import CRITERIA, client as real_client
 
 REPORTS = {
     "a_20230001.docx": "误差分析：A 类不确定度按贝塞尔公式，B 类按仪器允差。\n\n数据处理：逐差法计算。",
@@ -27,18 +27,21 @@ REPORTS = {
 }
 
 
-class SlowLLM(FakeLLM):
+class SlowLLM:
+    """包真客户端，只加并发计数：验证多份报告确实同时在跑（peak>=2）。"""
     active = 0
     peak = 0
     lock = threading.Lock()
+
+    def __init__(self):
+        self._inner = real_client()
 
     def chat(self, messages, temperature=0.3, retries=2, **kwargs):
         with type(self).lock:
             type(self).active += 1
             type(self).peak = max(type(self).peak, type(self).active)
         try:
-            time.sleep(0.05)
-            return super().chat(messages, temperature, retries)
+            return self._inner.chat(messages, temperature=temperature, retries=retries, **kwargs)
         finally:
             with type(self).lock:
                 type(self).active -= 1
@@ -90,13 +93,19 @@ def test_parallel_grading_keeps_all_results():
         assert state["task"]["status"] == "done"
         for index, entry in enumerate(state["extracted_reports"]):
             entry["meta"]["student"] = {"学号": f"2023{index:04d}", "姓名": f"学生{index}"}
+        # B4 门槛：确认前需要 1 份已评样本 + 每个启用维度都有教师等级
+        app_mod._save_pilot({"reports": [
+            {"filename": "样本.docx", "status": "graded",
+             "ai": {"误差分析": "A", "数据处理": "B"},
+             "teacher": {"误差分析": "A", "数据处理": "B"}}],
+            "confirmed_at": 0, "rubric_hash": ""})
         assert client.post("/pilot/confirm").status_code == 200
 
         resp = client.post("/start_grading", data="&".join("report_ids=" + quote(name) for name in REPORTS),
                            content_type="application/x-www-form-urlencoded")
         assert resp.status_code == 302
         assert _wait(lambda: (state.get("grading_status") or {}).get("phase") in
-                     ("done", "error", "cancelled"), 60)
+                     ("done", "error", "cancelled"), 240)
         status = state["grading_status"]
         assert status["phase"] == "done", status
         assert status["done"] == 3 and status["total"] == 3

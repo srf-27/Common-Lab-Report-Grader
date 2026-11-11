@@ -8,6 +8,11 @@
 import json
 import sys
 
+# MCP stdio 契约要求 UTF-8；Windows 子进程默认用 GBK，不重配就会把中文/√ 等字符写坏。
+for _stream in (sys.stdin, sys.stdout):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 RESOURCES = {
     "ref://physics/uncertainty": "不确定度：A 类按贝塞尔公式 s(x)/√n 计算；B 类按仪器最大允差/√3。"
                                  "逐差法只用于等间隔线性数据，且需 n 为偶数。",

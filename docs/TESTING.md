@@ -1,100 +1,72 @@
-# 测试与验证记录
+# 测试
 
-## 1. 怎么跑
+零依赖，不需要 pytest。全部端到端**调真实模型**（`config.yaml` 里的 `deepseek-flash`），断言的是**结构与状态**，不是模型吐出的原文。
 
 ```bash
-python tests/run_all.py            # 全部用例，零依赖（不需要 pytest）
-python tests/run_all.py -k mcp     # 只跑名字含 mcp 的用例
-python scripts/ocr_check.py        # OCR 准确性自检（合成图）
+python tests/run_all.py              # 全量（当前 129 项，unit 22 文件 + integration 7 文件）
+python tests/run_all.py -k mcp       # 按名字过滤（匹配 path::name）
+python tests/run_all.py -k grading   # 同上
 ```
 
-`tests/run_all.py` 会加载 `tests/unit/test_*.py` 与 `tests/integration/test_*.py`，执行其中所有 `test_*` 函数并汇总。假模型在 `tests/fake_llm.py`，通过改写 `experiment_report_grader.factory._make` 注入，不产生真实 API 费用。
+前提：设置好 `DEEPSEEK_API_KEY`（或 `config.yaml` 里填明文 key）。`run_all.py` 会把 stdout/stderr 重配成 UTF-8（Windows GBK 控制台需要），并对每个 `test_*.py` **惰性导入后逐个跑**——所以某个模块 import 失败会在跑到它时才炸，不影响前面已通过的用例。
 
-## 2. 用例矩阵（79 项）
+---
 
-| 模块 | 项数 | 覆盖点 |
-|---|---|---|
-| `unit/test_rubric_io.py` | 6 | 权重归一到 100、零权重均分、单维度、`_deleted` 跳过、机械/语义小计拆分、无判据与缺 doc_ref 校验收紧、Markdown 渲染 |
-| `unit/test_verifier.py` | 6 | `exists` / `numeric_compare` 规则、未知规则回退、LLM 生成代码 + 执行、`import os`/`eval`/`open`/`subprocess` 被拒 |
-| `unit/test_injection_detector.py` | 6 | JSON 解析宽容度、布尔解析、不可见字符规范化与摘要、待审文本以单个 JSON 字符串传递、检测器异常 fail-open 转人工、2 万字符截断标记 |
-| `unit/test_privacy.py` | 3 | LLM 实体替换为占位符、LLM 异常/非 JSON/未传时正则兜底（姓名/学号/邮箱/电话全部替换）、长实体优先替换 |
-| `unit/test_grader.py` | 8 | 正常评分与维度覆盖、注入拦截、内容安全拦截、非 JSON → `llm_failed`、简短维度名归一 + 缺失维度默认 C、维度归类与全文相似度、JSON/Excel（含可疑/缺交 sheet）导出、终审入维度库 |
-| `unit/test_chunking.py` | 4 | 跨行 `\[ … \]` 公式块不被空行切开、普通段落正常切分、未闭合公式并到末尾、上限截断 |
-| `unit/test_agreement.py` | 5 | 完全一致 = 1、相邻偏差下加权 κ > 未加权 κ、样本不足返回 None、百分制分档、按维度/总体结构 |
-| `unit/test_mcp.py` | 8 | 能力列举、握手 serverInfo、资源按通配过滤、工具与提示词注入、预算截断、未登记服务器与坏命令兜底、插件表单校验 |
-| `integration/test_user_flow.py` | 5 | 端到端点击流程（下节）、全页面渲染、带插图报告的图片渲染与取图、配置页协议切换（只提交当前协议字段，其他协议配置不被清空）、SPA `/app` 外壳与 7 个页面接口结构 |
-| **合计** | **51** | |
+## 真模型测试基座：`tests/real_llm.py`
 
-## 3. 模拟真实点击流程
+所有测试的公共入口，取代以前的 `FakeLLM` 关键字分流：
 
-`test_full_click_flow` 用 Flask test client 按用户真实操作顺序走一遍（假模型，秒级完成）：
+| 成员 | 用途 |
+| --- | --- |
+| `require_key()` | 没有可用 key 就直接失败，避免「静默跳过」看着像通过。 |
+| `client()` | 返回真实 `LLMClient`，走 `config.yaml` 的 backend/model。 |
+| `RecordingLLM` | 包住真客户端，记录 `.calls` / `.count`，并原样转发 `tools` / `tool_executor` 等 kwargs——用来断言「确实调了几次、传了什么」而不改判级标准。 |
+| `CRITERIA` / `RUBRIC` / `REPORT` | 一份最小可判级的细则与样本正文。 |
 
-1. 新建课程 → 工作台显示「尚未配置评分细则」且「开始评分」为 `aria-disabled`
-2. 上传评分标准 → 点「生成细则」→ 轮询任务到 `done` → 校验 2 个维度落盘
-3. 细则页改权重 → 「保存并生效」→ 校验权重合计 100
-4. 批量上传 3 份报告（其中 1 份与另一份正文完全相同）→ 点「提取内容」→ 校验 2 份入库、提示「自动去除 1 份重复」
-5. 打开报告维度详情、原文分页接口、原始文件下载
-6. 选择评分页勾选 1 份 → 「开始评分」→ 轮询到 `done` → 校验状态 `graded`、原文已挂维度、有总分
-7. 结果页改等级 + 写评语 → 保存 → 校验 `teacher_adjusted`；终审 → 校验 `approved.json` 与维度库入库
-8. 下载 Excel（校验是 zip/xlsx）
-9. 「打回重评」带修改意见 → 校验意见进入下一次评分提示词、终审标记被撤销
-10. 登记 MCP 插件 → 挂载 → 拉取参考 → 校验状态可用且参考文本含学科内容；再次评分 → 校验参考文本出现在评分提示词里
-11. 新建第二门课（状态清空）→ 切回原课程 → 校验细则、报告、评分结果、插件挂载都恢复
-12. 上传 CSV 花名册 → 校验名册页人数与缺交名单
+替换点仍是 `factory._make`（`factory.llm(config)` 的唯一出口）。测试模块在**导入时**设置 `factory._make`，这个覆盖会带进之后导入的模块——`run_all.py` 的惰性导入顺序依赖这一点。
 
-`test_report_with_image_renders` 另外覆盖：DOCX 内嵌图片 → 提取到 `images/` → 补水后还原图片列表 → 维度详情页渲染 `<img>` → 图片接口 200、错误文件名 404。
+---
 
-## 4. 实测结果
+## 断言口径（改测试前先读）
 
-| 项目 | 结果 |
-|---|---|
-| 全量用例 | **51 passed, 0 failed**，单轮约 12 秒 |
-| 稳定性 | 连续 8 轮全量运行均全绿 |
-| 既有数据兼容 | 用仓库内 `s_20261017_190801`（20 份 cn_lab 报告 + 已有评分）直接渲染：工作台、细则、报告列表、维度详情、评分结果、花名册、插件、配置全部 200 |
-| 页面规模 | 评分结果页（20 份报告 + 全部维度）约 205 KB HTML，一次性渲染，无分页丢失 |
-| OCR 自检 | paddleocr 3.7，3 条中英混排样本平均相似度 **1.000**（仅空格差异） |
+真实模型有不确定性，判级措辞每次都可能不同。因此：
 
-## 5. 手工验收清单
+- ✅ 断言**结构 / 状态 / 键存在**：`status in {graded, llm_failed}`、每个维度有 `level ∈ A–E`、细则维度名非空、权重归一到 100、collection 建出来了没、Excel 有没有导出、409/CSRF 闸门是否拦住。
+- ❌ 不断言模型原文，也不写死「总分 = 某个具体数字」或「维度一定叫『误差分析』」——细则维度名来自模型，用 `next(iter(scores))` 这类动态取。
+- **一致性校准**、**身份提取**这类依赖模型自由发挥的断言，改为在测试里**注入确定数据**（如直接写 `state["extracted_reports"][i]["meta"]["student"]`、注入已评好的 pilot），保证可复现。
+- 需要「细则已确认才能评分」的闸门测试，先注入一份 graded + teacher 已判的 pilot 再 `/pilot/confirm`（B4 门槛）。
 
-- [x] 无细则 / 无报告 / 无评分结果时，对应按钮为禁用态且有 title 说明
-- [x] 原始文件缺失时「原文」按钮禁用（不再是点了才 404）
-- [x] 细则改动后未重评的结果标「细则已改，需重评」，终审按钮禁用
-- [x] 评分进行中终审按钮禁用，页面提示后台仍在跑
-- [x] 过长内容折叠：维度块、报告卡片、名册编辑、缺交/可疑、一致性、配置分组
-- [x] 页面互跳：侧栏 / 面包屑 / 工作台三步卡片 / 报告行 → 维度详情 / 评分结果 → 维度详情
-- [x] 窗口 1440 / 1024 / 834 / 768 / 701 / 700 / 520 / 390 宽度下主要页面均无页面级横向滚动
-- [x] 浅色与深色模式各 8 个页面文字对比度审计：0 处低于 WCAG AA（正文 4.5:1、大字 3:1）
-- [x] 可点击区域审计：主按钮/导航项/列表摘要行 ≥44，小按钮由伪元素补到 44，开关由 44 高的 label 承担
-- [x] 键盘可达：skip-link、`aria-current`、`aria-pressed`、`role=progressbar`、`aria-live` 状态播报
-- [x] 十个页面（含维度详情、评分进度）浏览器控制台 0 个 JS 错误
-- [x] 花名册编辑表：表头输入与正文单元格逐列对齐；× 删除列有确认；横向滚动时操作列固定在左侧（scrollLeft=220 时列位置不变）
-- [x] 配置页协议切换：只提交当前协议的字段，切到 Ollama / 自定义时其他协议配置不被清空（有单测覆盖）
-- [x] 折叠态：报告卡「学生信息」、维度「挂载原文」、插件「参考文本节选」默认收起，摘要行可读且点击区域 ≥44
-- [x] 并行评分：3 份报告同时跑，结果 3/3 不丢，LLM 峰值并发 ≥2
-- [x] SPA（`/app/*`，13 个页面）：浅色/深色对比度 0 处不达标；390/1440 无横向滚动；10 条路由控制台 0 错误
-- [x] 未构建前端产物时 `/app` 返回 503 纯文本说明，提示执行 `npm run build`
-- [x] SPA 交互抽测：侧栏跳转不刷新、筛选 `aria-pressed`、原文抽屉分页、结果页折叠、花名册增删行列
-- [x] SPA 折叠面板指示器：收起「›」、展开「⌄」（工作台一致性分析、结果页每份报告均已实拍确认）
-- [x] SPA 长列表主操作常驻：「开始评分」`sticky bottom`，滚到第 20 份时仍在视口内（桌面 794/900、移动 687/844），且不压住底部标签栏
-- [x] `/favicon.ico` 返回 200（SVG），10 条路由控制台无 404
-- [x] 上传虚线框在任意宽度下是单一完整框，图标与文案居中（此前 `<span>` 行内盒导致虚线断裂、图标跑到右侧）
-- [x] 细则页五级判据在 1440 下五列并排、768 下三列、420 下单列，无横向滚动
-- [x] 维度详情中的多行公式（`\[ … \]`）渲染为 KaTeX 公式块（此前被分块拆散，显示为原始 TeX）
-- [x] 公式渲染（KaTeX）、Markdown 表格、代码块在正文块与原文抽屉正常
-- [x] 上传进度两段式：先传后处理，失败有可读原因
-- [x] MCP 插件不可用时评分照常完成，状态表标「不可用」
+---
 
-## 6. 基准跑批（真实模型）
+## 什么时候才用桩
+
+只有真实模型**无法可靠复现**的分支才用最小桩，其余一律真调：
+
+- 模型返回**非 JSON** / 结构畸形 → 触发兜底（记 C、标「请人工复核」、`llm_failed`）；
+- **内容安全**命中 `blocked_safety`、**注入检测** fail-open 放行、`detection_failed` / `audit_truncated` 留痕；
+- 客户端**重试 / 抛错 / 超时**路径；
+- OpenAI SDK 的 **streaming**、**function-calling 工具循环**、**MCP stdio 握手**这类协议机制本身。
+
+这些桩写在**具体测试文件里**（就近的 `class FakeLLM`），不在公共基座里；公共基座只负责真调。
+
+---
+
+## 覆盖面
+
+| 目录 | 内容 |
+| --- | --- |
+| `tests/unit/` | 客户端与计价、细则生成/归一/单元格补全、判级归一与工具循环、注入检测、内容安全、隐私、相似度、file_parser、calc/skills、流程工具带、CSRF、一致性指标等**纯逻辑**单测。 |
+| `tests/integration/` | `test_user_flow.py` 完整点击流（上传→细则→校准→提取→评分→终审→导出）；`test_parallel_grading.py` 并发与工具循环；`test_session_isolation.py` 评分中切课不串扰；`test_vector_prune.py` 维度删/建 collection；`test_reset_and_delete.py` 重置/删课/清理闸门；`test_panel_findings.py` 审查整改回归；`test_csrf.py` 破坏性请求令牌。 |
+| `tests/fixtures/` | `fake_mcp_server.py`（stdio 假服务，UTF-8 重配）、`bench/cn_lab/`（中文实验基准材料）。 |
+
+---
+
+## 基准跑批（会产生费用，手动跑）
 
 ```bash
 python tests/integration/bench_run.py tests/fixtures/bench/cn_lab
-python tests/integration/bench_run.py tests/fixtures/bench/cn_lab no-finalize
 ```
 
-产物写到该课程目录的 `agreement_result.txt`（总分档位 κ、混淆计数、逐维度指标）。会真实调用模型并产生费用，未纳入 `run_all.py`。
+对真实模型批量评一份基准课的全部报告，产出逐维度等级与一致性，用来观察判级质量随提示词/模型的漂移——不进 `run_all.py`（太长、太贵、不确定）。
 
-## 7. 已知非确定性
-
-- 相似度与 RAG 依赖向量库；默认内置嵌入离线可用，若切到 `openai` 嵌入需网络。
-- Chroma 本地库句柄在 Windows 上会短暂占用临时目录，测试用 `ignore_cleanup_errors` 规避。
-- 真实模型的判分本身有波动；一致性指标需要教师真值才能评估。
+OCR 单独自检：`python scripts/ocr_check.py`（或界面「配置 → OCR → 运行自检」）。

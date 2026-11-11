@@ -3,9 +3,13 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+_ROOT = Path(__file__).resolve().parents[2]
+for _p in (str(_ROOT / "src"), str(_ROOT / "tests")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from experiment_report_grader.nodes.rubric_generator import RubricGenerator
+from real_llm import client
 
 
 class _RetryLLM:
@@ -45,7 +49,19 @@ def test_generate_cells_raises_when_still_missing():
         raise AssertionError("缺字段应报错，不能静默返回")
 
 
+def test_generate_cells_real_llm_fills():
+    """真模型端到端：给清晰标准原文，补全缺失的 A/B 两档判据。"""
+    doc = ("误差分析章节：A 类不确定度按贝塞尔公式计算，B 类按仪器允差估算，"
+           "两者合成得总不确定度并写出置信概率；只做定性描述视为不合格。")
+    filled = RubricGenerator(llm_client=client()).generate_cells(
+        doc, "误差分析", {"levels": {"A": "", "B": ""}}, ["A", "B"])
+    assert str(filled["levels"]["A"]).strip(), filled
+    assert str(filled["levels"]["B"]).strip(), filled
+
+
 if __name__ == "__main__":
-    test_generate_cells_retries_missing_fields()
-    test_generate_cells_raises_when_still_missing()
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("ok", name)
     print("rubric cells ok")

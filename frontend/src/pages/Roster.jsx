@@ -209,7 +209,7 @@ export default function Roster() {
             <div className="list-row" key={item.report_id}>
               <span className="row-main">
                 <span className="row-title" style={{ display: "block" }}>
-                  {studentText(item.student, roster?.headers)}
+                  {studentText(item.student, data?.fields)}
                 </span>
                 <span className="row-sub" style={{ display: "block" }}>
                   {item.report_id} · {item.reason}

@@ -37,6 +37,16 @@ def test_compute_subtotals_splits_mechanical():
     assert out == {"procedural": 38.0, "semantic": 36.0, "total": 74.0}, out
 
 
+def test_compute_subtotals_normalizes_disabled_weights():
+    # 禁用维度不占分：有效权重 60 时全 A 应回到 95，而不是 57
+    rubric = {"criteria": [_criterion("课堂", 40), _criterion("报告", 60)]}
+    scores = {"报告": {"level": "A"}}
+    out = rubric_io.compute_subtotals(scores, rubric)
+    assert out["total"] == 95.0, out
+    half = rubric_io.compute_subtotals({"报告": {"level": "C"}}, rubric)
+    assert half["total"] == 60.0, half
+
+
 def test_check_vague_and_refs():
     warnings = rubric_io.check_vague_and_refs([
         {"name": "整体质量", "doc_ref": "", "levels": {"A": "好"}},

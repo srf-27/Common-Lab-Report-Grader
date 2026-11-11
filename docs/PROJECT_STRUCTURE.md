@@ -1,153 +1,86 @@
-# 项目结构说明
+# 项目结构
 
-> 模块职责、数据流与扩展点。使用方法见 [README](../README.md)，插件见 [MCP.md](MCP.md)，测试见 [TESTING.md](TESTING.md)。
+一句话：**Flask 后端做编排，逻辑落在 `nodes/` 与 `utils/`；React SPA 前端只调 JSON 路由；一切持久化统一走 `storage.py`（本地文件 / PostgreSQL 双后端）。**
 
-## 顶层
+---
 
-```
-run.py                  启动入口（--host / --port / --debug）
-pyproject.toml          项目元数据与依赖
-requirements.txt        pip 依赖清单
-frontend/               前端源码（React 19 + Vite 6，无组件库），构建产物写到 static/ui/
-config/                 运行配置（config.yaml 含密钥，已 gitignore）与插件注册表 mcp.yaml
-src/                    源码（src-layout）
-tests/                  测试（run_all.py 零依赖入口、unit、integration、fixtures）
-scripts/                辅助脚本（view_kb.py 查看向量库、ocr_check.py 验 OCR）
-docs/                   本文档目录
-data/output/sessions/   运行时数据（课程目录，gitignore）
-```
-
-## 包结构
+## 数据流（一门课的一生）
 
 ```
-experiment_report_grader/
-├── app.py                     路由与编排（约 700 行）：会话、细则、报告、评分、终审、导出、配置、插件
-├── factory.py                 LLM 工厂：llm(config) → LLMClient；测试通过替换 _make 注入假模型
-├── storage.py                 统一持久化入口：read/write_json/text；本地文件（默认）或 PostgreSQL
-│                              （storage.postgres.dsn，key=会话目录相对路径，表 session_kv）；
-│                              PG 未配置/不可用时静默回退文件；首次连上自动迁移本地 JSON
-├── web/
-│   ├── state.py               课程会话与全局状态：目录、sessions.json、approved.json、mcp.json、
-│   │                          花名册、hydrate_session（按目录重建内存态，含图片列表与评分结果）
-│   │                          RUNNING_STATUS：sid→评分进度注册表，会话隔离与切课恢复
-│   └── tasks.py               上传处理的后台任务进度（start/update/cancel/finish/running），
-│                              按会话登记（RUNNING_TASKS），线程持 task dict 引用更新
-├── nodes/
-│   ├── grader.py              判级主流程
-│   │                          · _check_similarity / _remember_report：全文相似度与入库
-│   │                          · _dimension_references / _exemplar_shots：维度 RAG 与 few-shot
-│   │                          · assign_items：文本/图片一次性归维度（失败返回空）
-│   │                          · grade_single：注入 → 安全 → 相似度 → 判级 → 归一 → 小计
-│   │                          · finalize_report：终审入 RAG（批量脱敏，一次 LLM 调用）
-│   │                          · export_results / export_excel：JSON 与成绩表（含可疑/缺交 sheet）
-│   ├── rubric_generator.py    结构化细则生成、单元格补全、偏差校验、校准对比（全部返回结构化 JSON）
-│   ├── rubric_io.py           new_criterion / normalize_weights / compute_subtotals /
-│   │                          check_vague_and_refs / criteria_to_markdown / LEVEL_POINTS
-│   ├── agreement.py           Cohen's κ / 二次加权 κ / Krippendorff's α + 混淆计数
-│   └── report_extractor.py    报告解析调度（压缩包递归、按扩展名分派）
-├── utils/
-│   ├── llm_client.py          OpenAI / Ollama / custom 客户端
-│   ├── file_parser.py         PDF（pymupdf4llm 版面分析）/ DOCX（含表格与图片顺序）/ MD / 压缩包
-│   ├── doc_reader.py          老式 .doc（OLE2 piece table + 图片签名切分）
-│   ├── ocr_engine.py          OCREngine 单例：paddleocr 2/3 与视觉 API 两种后端
-│   ├── ocr_check.py           合成图 → 识别 → 相似度（配置页按钮与 scripts/ocr_check.py 共用）
-│   ├── injection_detector.py  LLM 语义检测；不可见字符规范化 + 扫描摘要；失败转人工
-│   ├── content_safety.py      LLM 语义检测；失败 fail-open 并标记
-│   └── privacy.py             LLM 实体提取替换；失败回退正则
-├── mcp/
-│   ├── client.py              JSON-RPC 2.0 客户端（stdio 子进程 / http + SSE），
-│   │                          initialize、tools、resources、prompts；collect() 按挂载拉参考
-│   └── store.py               config/mcp.yaml 读写、表单校验
-└── static/
-    ├── ui/                    SPA 构建产物（Vite 输出，gitignore）
-    └── vendor/                KaTeX（公式渲染）
+上传标准 ─▶ 细则生成 ─▶ 样本校准(确认) ─▶ 上传报告(提取) ─▶ 选择评分 ─▶ 逐份判级 ─▶ 终审 ─▶ 导出
+   │           │             │                │                          │           │        │
+   │      rubric_generator  agreement      report_extractor          grader.py    approve  rubric_io
+   │      (rubric_io 归一)  (pilot/*)      (file_parser/doc_reader)  (RAG/相似度)  入库     (Excel)
+   ▼
+config/mcp.yaml + skills/ ── 各 LLM 节点按需挂载 calc / skill / mcp 工具（function calling）
 ```
 
-## 前端（SPA）
+- **细则**：`rubric_generator` 让模型把标准文档拆成维度（A–E 判据 + 权重），`rubric_io` 归一权重、校验、渲染 Markdown。
+- **校准**：≤5 份样本，模型与教师各评一次，`agreement` 算 κ / 加权 κ / α；确认后才允许正式评分（`app._rubric_confirmed` 是闸门）。
+- **提取**：`report_extractor` + `utils/file_parser` / `doc_reader` 抽正文、表格、插图、学生信息（`student_fields`）；扫描件走 `ocr_engine`；非常见格式经 markitdown MCP 兜底。
+- **判级**：`grader.py` 逐维度找证据判 A–E；注入检测 / 内容安全并行前置，维度归类与判级并行；RAG 相似度、隐私脱敏、计算验算都在这里。
+- **终审/导出**：改等级、写教师说明、`approve` 入库并把本份判级作为后续范例；`rubric_io` 出成绩 Excel。
 
-`/` 与 `/app/*` 只由 React 单页应用承载；旧的 Jinja 页面与历史兼容路径（`/classic`、`/rubric_review` 等）已全部删除。
+---
 
-```
-frontend/
-├── package.json             react 19 / vite 6（无 UI 组件库）
-├── vite.config.js           base=/static/ui/，产物直出 src/experiment_report_grader/static/ui
-└── src/
-    ├── app.jsx              侧栏 / 移动端底部标签栏 + 路由分发
-    ├── main.jsx             应用入口与全局 Provider
-    ├── ui/index.jsx         按钮、分组列表、Sheet、LevelPicker、Badge 等基础件
-    ├── lib/
-    │   ├── router.jsx       usePath / navigate / matchRoute（history API，无路由库）
-    │   ├── api.js           getJSON / postForm / postFormJSON / postJSON / postEmpty
-    │   ├── hooks.js         useData / usePoll / useMedia 等
-    │   ├── store.jsx        课程会话与 bootstrap 上下文
-    │   └── markdown.jsx     Markdown + 表格 + KaTeX 公式
-    └── pages/               13 个页面：Workbench、Rubric、Reports、ReportDetail、Select、
-                             Progress、Results、Roster、Calibration、Settings、Mcp、Usage、VectorStore
-```
-
-写操作复用 Flask 的表单端点（`/upload_criteria`、`/start_grading`、`/update_scores` 等），
-页面数据走只读的 `/api/*`，避免同一业务逻辑写两遍。
-
-## 数据流
+## 模块职责
 
 ```
-评分标准文档 ──(process_criteria)──> RubricGenerator.generate_structured
-                                      └─> rubric_current.json / rubric_latest.md / criteria_doc.txt
-
-报告文件 ──(process_reports)──> ReportExtractor
-        ├─ reports/<stem>/text.md        正文（逐页/逐段）
-        ├─ reports/<stem>/images/        图片（按出现顺序命名，含上下文标签）
-        ├─ reports/<stem>/meta.json      页数、图片数、学生信息、提取时间
-        └─ 同文本哈希去重（保留先上传者）
-
-评分 ──(start_grading)──> 线程池并行 _grade_one（默认 3 路，ERG_GRADING_WORKERS 可调）
-        ├─ 图片/段落一次性 assign_items → text_assignments / image_assignments
-        ├─ Grader.grade_single
-        │   ├─ detect_injection  → 命中：flagged_injection（不评分）
-        │   ├─ check_content_safety → 命中：blocked_safety（不评分）
-        │   ├─ _check_similarity → similarity_warnings
-        │   ├─ 组装 GRADING_PROMPT（维度 + RAG 参考 + 插件参考 + 正文 8000 字 + 图片说明）
-        │   ├─ _parse_json → 失败：llm_failed
-        │   └─ _normalize_scores + compute_subtotals
-        ├─ MCP 参考：本轮开始前 collect 一次（不是每份一次）
-        └─ 结束：grading_results.json + grading_summary.xlsx + flagged_students.xlsx
-
-终审 ──(approve_report)──> finalize_report
-        ├─ 全文 + 判定 JSON → 全文库（脱敏后）
-        └─ 维度段落/图片 → dim_<hash> 维度库
-
-下轮评分 ──> _dimension_references / _exemplar_shots 读回，形成闭环
+run.py                              启动入口（--host / --port / --debug）
+config/
+  config.example.yaml               配置模板（复制成 config.yaml 再改，含密钥不入库）
+  mcp.example.yaml                  MCP 注册表模板（复制成 mcp.yaml）
+src/experiment_report_grader/
+  app.py                            所有 HTTP 路由，只做编排；/api/flow 流程页、/pilot/* 校准、
+                                    /mcp/* 插件、终审与导出都在这里串起来
+  factory.py                        模型实例工厂 llm(config) → MeteredLLM（测试的唯一替换点）
+  storage.py                        统一持久化入口：本地文件 / PostgreSQL 双后端，PG 不可用静默降级
+  nodes/                            评分业务（纯逻辑，不碰 HTTP）
+    grader.py                       判级主流程、维度归一、RAG、相似度、function-calling 工具循环
+    rubric_generator.py             细则生成 / 单元格补全 / 校准对比
+    rubric_io.py                    权重归一、小计、校验、Markdown、成绩 Excel 导出
+    agreement.py                    一致性指标（Cohen κ / 加权 κ / Krippendorff α）
+    external_scores.py              课外维度成绩单：解析、按学号合并、重算小计
+    report_extractor.py             报告正文/表格/插图/学生信息提取，OCR 与解析失败归档
+  utils/                            基础设施
+    llm_client.py                   OpenAI 兼容客户端（重试 / 超时 / usage 统计）
+    calc_tools.py                   内置计算工具包 calc_eval / calc_stats / calc_fit（OpenAI tools 契约）
+    skills.py                       技能包加载器：skills/<名>/skill.py 提供 TOOLS_SCHEMA + dispatch
+    file_parser.py / doc_reader.py  DOCX/PDF/MD/压缩包 → Markdown，表格与图片
+    ocr_engine.py / ocr_check.py    扫描件 OCR（paddleocr / 视觉 API）与自检
+    injection_detector.py           提示注入检测
+    content_safety.py               内容安全检测
+    privacy.py                      进 RAG 前的隐私脱敏（正则兜底）
+    safe_error.py                   对外错误信息统一打码（不回显绝对路径 / 密钥）
+    student_fields.py               学生身份字段（学号/姓名/班级）按花名册表头归一
+  web/                              会话与运营支撑
+    state.py                        课程会话、目录、审批记录、MCP 挂载、花名册、状态恢复
+    tasks.py                        上传/生成等后台任务的进度机
+    usage.py / pricing.py / balance.py  token 用量、四槽计价（对齐 cc-switch）、账户余额校准
+  mcp/
+    client.py                       MCP JSON-RPC 客户端（stdio 子进程 + http），只实现评分用到的方法
+    store.py                        服务器注册表读写 config/mcp.yaml（挂载在会话目录，不在这）
+  static/                           前端构建产物、KaTeX、favicon（由 frontend 构建生成）
+frontend/                           React 19 + Vite 6 的 SPA（无组件库）
+  src/pages/                        14 个页面，一页一文件（含流程页 Flow.jsx）
+  src/ui/                           按钮、分组列表、sheet、等级选择器等基础件
+  src/lib/                          请求、路由、数据钩子、上下文、Markdown/公式
+  src/styles.css                    设计令牌与全部样式
+skills/                             可选技能包目录：chem_calc/（skill.py + SKILL.md）
+scripts/                            ocr_check.py 独立自检、view_kb.py 向量库查看
+docs/                               本目录：MCP.md / PROJECT_STRUCTURE.md / TESTING.md / 运行链路图.drawio
 ```
 
-## 文件系统布局（每门课）
+---
 
-```
-data/output/sessions/<课程ID>/
-├── sessions.json            （在 data/output 下）课程索引与当前课程
-├── rubrics/                 rubric_current.json / rubric_latest.md / criteria_doc.txt
-├── uploads/                 用户上传原件（含 calibration_ 前缀的校准报告）
-├── reports/<stem>/          text.md、images/、meta.json、.ocr/（开启插图 OCR 时的缓存）
-├── grading/                 grading_results.json、grading_summary.xlsx、flagged_students.xlsx
-├── kb_db/                   Chroma 本地库（全文 + 各维度 collection）
-├── approved.json            已终审报告 ID
-├── roster.json              花名册（headers + rows）
-├── mcp.json                 本课程挂载的插件与参考预算
-└── teacher_grades.json      （可选）教师真值，用于一致性分析
-```
+## 扩展点（想加东西先看这里）
 
-## 扩展点
-
-| 想做的事 | 改哪里 |
-|---|---|
-| 换模型/换网关 | 「配置」页或 `config.yaml` 的 `llm`；不改代码 |
-| 加一个学科知识源 | 写/接一个 MCP 服务，在「插件」页登记并挂载；不改代码 |
-| 换向量库 | 实现 `embedding/base.py::VectorStoreBase` 的子类，在 `nodes/grader.py` 的客户端选择处接入 |
-| 换嵌入模型 | 「配置」页 `embedding.backend=openai` + 模型名 |
-| 加判级可调用工具 | `utils/calc_tools.py` 加实现与 schema；判级节点在「流程」页挂载 |
-| 改评分提示词 | `nodes/grader.py::GRADING_PROMPT`（保持 JSON 输出契约） |
-| 加页面 | `frontend/src/pages/` 新建页面 + `app.jsx` 的 `Page` 与 `NAV` |
-| 改判级分值 | `nodes/rubric_io.py::LEVEL_POINTS`（导出与一致性同步生效） |
-
-## 受保护文件约定（已退役）
-
-曾有"文件首行标 `checked` 的受保护文件"约定，2026-10 已退役，标识全部移除：所有文件按普通代码对待，改动走正常 review。能力扩展仍建议优先走新模块（例如 OCR 自检放在 `utils/ocr_check.py`，图片 OCR 开关放在 `app.py` 的 `_image_entries`）。
+- **加一个判级时可调用的工具**：三选一，都不改判级主流程——
+  1. 内置：往 `utils/calc_tools.py` 的 `_IMPL` / `TOOLS_SCHEMA` 添一项；
+  2. 技能包：新建 `skills/<名>/skill.py`，导出 `TOOLS_SCHEMA` 与 `dispatch(name, args)`（配 `SKILL.md` 首段做描述）；
+  3. MCP：在流程页注册服务器并挂载，工具自动桥接。
+  然后在流程页对应 LLM 节点勾选它。契约见 `nodes/grader.py` 的工具循环与 `app._node_toolbelt`。
+- **加/改一个页面**：`frontend/src/pages/` 加一页，`app.jsx` 挂路由，后端在 `app.py` 加 `/api/...` JSON 路由；改完 `cd frontend && npm run build` 生成 `static/ui/`。
+- **换持久化后端**：只碰 `storage.py`；业务层都通过它读写，PG 与本地文件行为对齐。
+- **换模型/供应商**：`config.yaml` 的 `llm.*` 或界面配置页，`factory.llm()` 是唯一出口。
+- **一致性指标**：`nodes/agreement.py`，校准页展示的就是它算出来的。

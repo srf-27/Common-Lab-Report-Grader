@@ -3,6 +3,7 @@ import { errorText, getJSON, postEmpty, postForm, postJSON } from "../lib/api";
 import { studentText } from "../lib/format";
 import { useData, usePoll } from "../lib/hooks";
 import { Link } from "../lib/router";
+import { useApp } from "../lib/store";
 import { toast } from "../lib/toast";
 import {
   Badge,
@@ -31,6 +32,8 @@ const FILTERS = [
 
 export default function Reports() {
   const { data, error, loading, load } = useData("/api/reports");
+  const { boot } = useApp();
+  const noRubric = boot?.rubric?.count === 0;
   const [files, setFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [task, setTask] = useState(null);
@@ -65,11 +68,12 @@ export default function Reports() {
       setTask(next);
       if (next.status !== "running") {
         setPolling(false);
+        // 失败也要刷新列表：失败清单和已入库的那部分都在 /api/reports 里
+        load();
         if (next.status === "done") {
           toast(next.detail || "报告已提取完成", "ok");
-          load();
         } else if (next.status === "error") {
-          toast(next.error || "提取失败", "danger");
+          toast(next.error || next.detail || "提取失败", "danger");
         }
       }
     } catch (err) {
@@ -81,6 +85,7 @@ export default function Reports() {
   usePoll(tick, 1200, polling);
 
   const reports = data?.reports || [];
+  const failures = data?.failures || [];
   const fields = data?.fields || [];
 
   const counts = useMemo(
@@ -113,17 +118,24 @@ export default function Reports() {
     if (!files.length) return toast("请先选择报告文件", "danger");
     setBusy(true);
     try {
-      await postForm("/upload_reports", { report_files: files });
+      const res = await postForm("/upload_reports", { report_files: files });
       await postForm("/process_reports", {});
       const next = await getJSON("/task_status");
       if (next?.kind !== "reports" || next.status !== "running") {
         toast("没能开始提取，请重试", "danger");
         return;
       }
+      const picked = new Set(files.map((f) => f.name));
+      const renamed = (res.filenames || []).filter((n) => !picked.has(n));
       setTask(next);
       setPolling(true);
       setFiles([]);
-      toast(`已上传 ${files.length} 个文件，开始提取正文`, "ok");
+      toast(
+        renamed.length
+          ? `已上传 ${res.count || files.length} 个文件（同名文件已自动重命名：${renamed.join("、")}），开始提取正文`
+          : `已上传 ${res.count || files.length} 个文件，开始提取正文`,
+        "ok"
+      );
     } catch (err) {
       toast(errorText(err), "danger");
     } finally {
@@ -154,7 +166,9 @@ export default function Reports() {
     <>
       <PageHead
         title="实验报告"
-        sub={`${reports.length} 份已提取 · ${counts.graded} 份已评分 · ${counts.approved} 份已终审`}
+        sub={`${reports.length} 份已提取 · ${counts.graded} 份已评分 · ${counts.approved} 份已终审${
+          failures.length ? ` · ${failures.length} 份解析失败` : ""
+        }`}
         actions={
           data?.downloads?.excel ? (
             <a className="btn btn-tinted" href={`/download/${data.downloads.excel}`}>
@@ -202,11 +216,42 @@ export default function Reports() {
         </div>
       ) : null}
 
+      {failures.length ? (
+        <div style={{ marginBottom: 18 }}>
+          <Group
+            title="解析失败"
+            note={`${failures.length} 份`}
+            footer="这些文件没有提取出正文：格式不支持、文件损坏，或缺少 markitdown 插件。换格式或修好文件后重新上传（同名文件会覆盖这一项）。"
+          >
+            {failures.map((item) => (
+              <div className="list-row" key={item.filename} data-disabled="true">
+                <span className="row-main">
+                  <span className="row-title" style={{ display: "block" }}>
+                    {item.filename}
+                  </span>
+                  <span className="row-sub" style={{ display: "block" }}>
+                    {item.reason}
+                  </span>
+                </span>
+                <Badge tone="danger">解析失败</Badge>
+              </div>
+            ))}
+          </Group>
+        </div>
+      ) : null}
+
       <Group
         title="上传报告"
         note="PDF / DOCX / DOC / MD / ZIP；HTML / PPTX / XLSX / EPUB 经 markitdown 插件转换"
         footer="提取会解析正文、插图与学生信息；扫描页调用 OCR。同一学生在评分时只能选一份。"
       >
+        {noRubric ? (
+          <div style={{ marginBottom: 12 }}>
+            <Banner tone="warn" icon="alert">
+              请先生成评分细则，再上传报告。没有细则时无法进入评分。
+            </Banner>
+          </div>
+        ) : null}
         <Dropzone
           accept=".pdf,.docx,.doc,.md,.zip,.rar,.7z,.html,.htm,.pptx,.xlsx,.epub"
           multiple
@@ -220,9 +265,10 @@ export default function Reports() {
           <Button
             variant="filled"
             icon="upload"
-            disabled={!files.length || busy || polling}
+            disabled={!files.length || busy || polling || noRubric}
             loading={busy && !polling}
             onClick={upload}
+            title={noRubric ? "请先生成评分细则" : undefined}
           >
             上传并提取
           </Button>

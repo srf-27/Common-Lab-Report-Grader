@@ -654,6 +654,24 @@ button:disabled {
   color: var(--label-2);
 }
 
+/* 窄屏：组头的说明与操作按钮换行，避免整页横向溢出 */
+@media (max-width: 560px) {
+  .group-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .group-header > .row {
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  .group-title,
+  .group-note {
+    white-space: nowrap;
+  }
+}
+
 .list {
   background: var(--surface);
   border-radius: var(--r-card);

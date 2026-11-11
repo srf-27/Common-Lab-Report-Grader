@@ -109,10 +109,18 @@ function resolve(path) {
 export default function App() {
   const { boot, fatal, reload, switchSession, createSession } = useApp();
 
+  // 评分进行中 2s 轮询，空闲 12s；页面隐藏时跳过，避免后台标签空转打满服务端
+  const taskRunning = boot?.task?.status === "running";
   useEffect(() => {
-    const timer = setInterval(() => reload(), 12000);
-    return () => clearInterval(timer);
-  }, [reload]);
+    const interval = taskRunning ? 2000 : 12000;
+    let timer;
+    const tick = () => {
+      if (document.visibilityState !== "hidden") reload();
+      timer = setTimeout(tick, interval);
+    };
+    timer = setTimeout(tick, interval);
+    return () => clearTimeout(timer);
+  }, [reload, taskRunning]);
   const path = useRoute();
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -372,7 +380,7 @@ export default function App() {
             <Button
               variant="filled"
               loading={busy}
-              disabled={busy}
+              disabled={busy || !name.trim()}
               onClick={async () => {
                 setBusy(true);
                 const ok = await createSession(name);

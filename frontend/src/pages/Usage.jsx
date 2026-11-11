@@ -405,7 +405,7 @@ export default function Usage() {
     <div className="u-page">
       <header className="u-head">
         <div>
-          <h1 className="u-title">使用统计</h1>
+          <h1 className="u-title">用量统计</h1>
           <p className="u-sub">查看当前课程的模型调用次数、Token 与成本</p>
         </div>
         <div className="u-filters">
