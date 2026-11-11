@@ -72,7 +72,7 @@ def test_switch_session_mid_grading_is_isolated():
 
         calls = []
 
-        def fake_grade_one(grader, entry, references="", corrections=None):
+        def fake_grade_one(grader, entry, references="", corrections=None, config_snapshot=None):
             corrections = corrections if corrections is not None else {}
             calls.append((entry["meta"]["filename"], corrections.get(entry["meta"]["filename"],
                                                                      "<无意见>")))
@@ -140,7 +140,7 @@ def test_corrections_survive_regrade_failure():
              app_mod._image_descriptions, app_mod._grading_workers)
     try:
         app_mod._report_text = lambda e: "正文"
-        app_mod._image_entries = lambda e: []
+        app_mod._image_entries = lambda e, cfg=None: []
         app_mod._image_descriptions = lambda e: ""
         app_mod._grading_workers = lambda: 1
         grader.assign_items = lambda items, shots_query="": {}
@@ -155,7 +155,24 @@ def test_corrections_survive_regrade_failure():
          app_mod._image_descriptions, app_mod._grading_workers) = saved
 
 
+def test_session_remove_blocked_while_grading():
+    """评分进行中删课要被拒：删课会 hydrate 到另一门课，后台线程会写进新课程目录。"""
+    client = app_mod.app.test_client()
+    state = state_mod.state
+    saved = state.get("grading_status")
+    headers = {"X-CSRF-Token": app_mod.CSRF_TOKEN}
+    try:
+        state["grading_status"] = {"phase": "running"}
+        resp = client.post("/session/remove", data={"session_id": state.get("session")},
+                           headers=headers)
+        assert resp.status_code == 409, resp.status_code
+        assert "任务正在进行" in resp.get_json()["error"], resp.get_json()
+    finally:
+        state["grading_status"] = saved
+
+
 if __name__ == "__main__":
     test_switch_session_mid_grading_is_isolated()
     test_corrections_survive_regrade_failure()
+    test_session_remove_blocked_while_grading()
     print("test_session_isolation ok")

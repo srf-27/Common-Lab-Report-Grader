@@ -35,6 +35,7 @@ def test_template_formats_without_missing_fields():
         exemplar_shots="（暂无已终审范例）",
         report_text="报告正文",
         image_descriptions="（本报告无图片）",
+        teacher_notes_block="（无教师补充）",
         extra_notes="（无）",
     )
     assert rendered.index("### 维度") < rendered.index("报告正文")

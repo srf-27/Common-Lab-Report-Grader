@@ -158,13 +158,17 @@ def test_process_criteria_needs_confirm():
     try:
         sid, _, _ = _setup(tmp, reports=("a.docx",))
         client = app_mod.app.test_client()
+        # B1：只认显式上传的细则文件，不再自动猜测；先放一份再验二次确认门槛
+        cpath = os.path.join(state_mod.SESSIONS_DIR, sid, "uploads", "criteria_test.txt")
+        io.open(cpath, "w", encoding="utf-8").write("评分标准：维度甲 100 分")
+        state_mod.state["criteria_upload"] = cpath
         resp = client.post("/process_criteria")
         assert resp.status_code == 409 and resp.get_json().get("needReset")
-        # 空课程（无下游）不受影响：404/302 之外不应是 409 —— 用新会话验证
+        # 空课程：没有上传细则 → B1 前置校验直接 409（但不是 needReset 的下游保护）
         sid2 = new_session("空课程")["id"]
         hydrate_session(sid2)
         resp2 = client.post("/process_criteria")
-        assert resp2.status_code != 409
+        assert resp2.status_code == 409 and not (resp2.get_json() or {}).get("needReset")
     finally:
         _teardown(*real)
         shutil.rmtree(tmp, ignore_errors=True)
@@ -239,8 +243,8 @@ def test_pilot_and_criteria_and_external_cleanup():
         resp = client.post("/external/clear")
         assert resp.get_json()["cleared"] == 1
         assert "课外项" not in grader.results[0]["grading"]["scores"]
-        assert grader.results[0]["grading"]["subtotals"]["total"] == 64.0, \
-            "小计应回滚为维度甲 B(80 分)×80% 权重"
+        assert grader.results[0]["grading"]["subtotals"]["total"] == 80.0, \
+            "小计应回滚为维度甲 B(80 分)，按有效权重 80 折算回百分制"
         assert not storage_exists(os.path.join(base, "external_scores.json"))
         assert state_mod.state["external"] == {}
         # 再次清除是 no-op

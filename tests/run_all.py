@@ -12,6 +12,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
+# Windows 控制台默认 GBK：测试里全是中文，不重配就是一屏乱码
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def modules():
     for folder in ("unit", "integration"):
@@ -23,6 +28,9 @@ def modules():
 
 
 def main(argv):
+    # 测试客户端统一豁免 CSRF（app.testing）；test_csrf.py 会临时关掉它单独验证
+    from experiment_report_grader.app import app
+    app.config["TESTING"] = True
     keyword = ""
     if "-k" in argv:
         keyword = argv[argv.index("-k") + 1]
