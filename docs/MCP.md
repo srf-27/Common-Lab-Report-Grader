@@ -1,144 +1,77 @@
-# MCP 插件接入
+# MCP 插件
 
-评分时可以用 MCP 服务提供的学科资料（reference）辅助判级。插件按课程挂载，互不污染；插件不可用时评分照常进行。
+MCP（Model Context Protocol）服务器可以给评阅补充两类能力，都挂在**流程页**（原「插件页」已并入此页）：
 
-## 1. 协议与传输
+1. **学科参考资料**：评分开始前拉一次参考文本，注入提示词的「学科参考资料」段（`不确定度规范`这类只读资料）。
+2. **可调用的工具**：把服务器暴露的工具（`tools/list` 的 `inputSchema`）直接转成 OpenAI function-calling 的 `tools`，判级时模型**真实调用**它，结果回灌进判级理由。
 
-实现 JSON-RPC 2.0，支持两种传输：
+没有插件也能正常评分；插件不可用或超时，参考为空、评分继续。
 
-| 传输 | 配置 | 说明 |
-|---|---|---|
-| stdio | `command` + `args` + `env` | 启动子进程，按行读写 JSON；`initialize` 后发 `notifications/initialized` |
-| http | `url` + `headers` | POST JSON-RPC；响应为 `application/json` 或 `text/event-stream`（取 `data:` 行），回传 `Mcp-Session-Id` |
+---
 
-已实现方法：
+## 注册一个服务器
 
-- `initialize`（协议版本 `2024-11-05`）
-- `tools/list`、`tools/call`
-- `resources/list`、`resources/read`
-- `prompts/list`、`prompts/get`
+两种方式，等价：
 
-超时：单次调用 25 秒（`mcp/client.py::CALL_TIMEOUT`），兼顾 `npx` / Python 子进程冷启动。
-
-## 2. 登记
-
-「插件 → 添加插件」或直接编辑 `config/mcp.yaml`：
+- **界面**：流程页 → 添加插件，填表单。
+- **文件**：复制 `config/mcp.example.yaml` 为 `config/mcp.yaml` 后编辑（`config/mcp.yaml` 已被 `.gitignore` 排除，含密钥不要提交）。
 
 ```yaml
 servers:
   physics-ref:
-    transport: stdio
+    transport: stdio              # 本地子进程
     command: npx
     args: ["-y", "@your/physics-ref-server"]
     env:
       REF_API_KEY: "xxx"
     note: "物理实验学科参考"
+
   lab-http:
-    transport: http
+    transport: http               # 远程端点（Streamable HTTP / JSON-RPC）
     url: "http://127.0.0.1:8931/mcp"
     headers: {}
+    note: "远程学科参考"
+
+  markitdown:                     # 报告格式兜底转换，见下节
+    transport: stdio
+    command: markitdown-mcp       # pip install markitdown-mcp
+    note: "html/pptx/xlsx/epub → Markdown"
 ```
 
-名称只允许字母、数字、`-` `_` `.`。
+字段：`transport`（`stdio` / `http`）必填；stdio 用 `command` + `args` + `env`，http 用 `url` + `headers`；`note` 只在界面显示。
 
-## 3. 挂载
+---
 
-「插件 → 挂载到 <课程>」：
+## 挂到当前课程
 
-| 字段 | 语义 |
-|---|---|
-| 勾选服务器 | 参与本课程评分的插件 |
-| 资源过滤 | 每行一个 `fnmatch` 通配，如 `ref://physics/*`；留空读全部 |
-| 检索工具名 | 工具名，参数固定为 `{"query": "<本课程维度名>"}`，取返回的 `content[].text` |
-| 学科提示词名 | `prompts/get` 的名字，参数 `{"topic": "<维度名>"}`，取 `messages[].content` |
-| 参考文本上限 | 注入提示词的字符预算（200–20000） |
+流程页 → 挂载到当前课程，勾选要用的服务器。挂载是**按课程**保存的（`<课程>/mcp_mount`），切课互不影响。每个 LLM 节点（细则生成 / 校准 / 注入检测 / 内容安全 / 维度归类 / 判级）都可单独选择挂载哪些能力：
 
-挂载写入 `data/output/sessions/<课程>/mcp.json`；切换课程不会串用。
+- `calc` —— 内置计算工具包（`calc_eval` / `calc_stats` / `calc_fit`），不依赖任何服务器；
+- `skill:<名字>` —— 本机 `skills/<名字>/skill.py` 技能包（提供 `TOOLS_SCHEMA` + `dispatch`）；
+- `mcp:<服务器>` —— 上面注册的 MCP 服务器的工具。
 
-## 4. 注入位置与顺序
+不挂载时，判级节点默认只开 `calc`（受 `grading.calc_verify` 控制）；参考资料只在课程挂载了服务器时才会去拉取。
 
-评分开始时（`_spawn_grading`）调用一次 `mcp/client.py::collect`，按挂载顺序拼接：
+---
 
-```
-### 插件：<名称>
-【<资源名或 uri>】
-<resources/read 的 text>
+## 报告格式兜底（markitdown）
 
-【检索 <tool>】
-<tools/call 的 text>
-
-【学科指引】
-<prompts/get 的 messages>
-```
-
-总长受 `max_chars` 截断，随后填入评分提示词的「学科参考资料（插件提供，仅作事实核对）」段。提示词同时明确：参考材料用于事实核对，不得据此臆造证据。
-
-## 5. 失败兜底
-
-| 情况 | 行为 |
-|---|---|
-| 服务器未登记 | 状态 `不可用`，错误「服务器未在配置中登记」；参考为空 |
-| 子进程起不来/退出 | 状态 `不可用`，错误含原因；参考为空 |
-| 调用超时 | 单次 25 秒后判超时；该插件本轮跳过 |
-| `tools/call` 报错 | 仅该工具段落缺失，资源段落仍可用 |
-| `resources/read` 单条失败 | 该条缺失，其余继续 |
-| `prompts/get` 失败 | 提示词段落缺失，其余继续 |
-
-以上任一情况都不会中断评分；「插件」页与结果页展示状态表（可用/不可用、条目数、错误）。评分提示词里参考为空时显示「（无插件参考）」。
-
-## 6. 自测
+本地解析器只处理 PDF/DOCX/DOC/MD。`.html` / `.pptx` / `.xlsx` / `.epub` 会经 **markitdown MCP** 转成 Markdown 再入库；插件缺席时这些文件被跳过并进「解析失败」清单，其余行为不变。
 
 ```bash
-python tests/run_all.py -k mcp
+pip install markitdown-mcp
 ```
 
-测试用一个自带的最小服务 `tests/fixtures/fake_mcp_server.py` 覆盖握手、资源、工具、提示词、预算截断、坏命令兜底。
+---
 
-手工联调：
+## 运行时行为与排障
 
-```bash
-# 终端 1：跑一个最小 MCP 服务（行分隔 JSON-RPC）
-python tests/fixtures/fake_mcp_server.py
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 参考资料为空 | 当前课程没挂载服务器，或服务器 `initialize` 失败——看流程页每台的状态与错误原因。 |
+| 工具没被调用 | 该 LLM 节点没勾这个 `mcp:<服务器>`；或服务器 `tools/list` 返回空。 |
+| stdio 启动失败 | `command` 不在 PATH，或子进程没按 UTF-8 读写（本项目 fixture 已 `sys.stdout.reconfigure(encoding="utf-8")`，自建服务同理，MCP stdio 契约要求 UTF-8）。 |
+| http 超时 | 端点没起 / 端口不对；评分不阻塞，参考留空继续。 |
+| 换课忘了挂 | 挂载按课程独立，需在新课程重新勾选。 |
 
-# 终端 2：直接看能力清单
-python - <<'PY'
-import sys; sys.path.insert(0,'src')
-from experiment_report_grader.mcp import client
-print(client.describe({"transport":"stdio","command":sys.executable,
-                       "args":["tests/fixtures/fake_mcp_server.py"]}))
-PY
-```
-
-HTTP 插件同理，把 `{"transport":"http","url":"http://127.0.0.1:8931/mcp"}` 传给 `describe` 即可。
-
-## 7. 编写自己的学科参考服务
-
-最小可用形态（stdio，Python 标准库即可）：
-
-```python
-import json, sys
-
-DOCS = {"ref://physics/uncertainty": "A 类按贝塞尔公式，B 类按仪器允差/√3。"}
-
-def handle(method, params):
-    if method == "initialize":
-        return {"protocolVersion": "2024-11-05", "capabilities": {"resources": {}},
-                "serverInfo": {"name": "my-refs", "version": "0.1"}}
-    if method == "resources/list":
-        return {"resources": [{"uri": u, "name": u.rsplit("/", 1)[-1]} for u in DOCS]}
-    if method == "resources/read":
-        return {"contents": [{"uri": params["uri"], "text": DOCS[params["uri"]]}]}
-    raise KeyError(method)
-
-for line in sys.stdin:
-    msg = json.loads(line)
-    if "id" not in msg:
-        continue
-    try:
-        out = {"jsonrpc": "2.0", "id": msg["id"], "result": handle(msg["method"], msg.get("params") or {})}
-    except Exception as e:
-        out = {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32000, "message": str(e)}}
-    print(json.dumps(out, ensure_ascii=False), flush=True)
-```
-
-若要支持「按知识点检索」，再实现 `tools/list` 与 `tools/call`（工具名填到挂载表单的「检索工具名」）。
+**单台失败只影响这一台**：它写进 `mcp_status` 的状态与错误原因，其余服务器照常收集，评分继续。页面会列出每台服务器的最近状态。
